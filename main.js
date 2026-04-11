@@ -29,6 +29,17 @@ function saveDb() {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+function spawnAsync(bin, args) {
+  return new Promise((resolve, reject) => {
+    const { spawn } = require('child_process');
+    const proc = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('close', code => resolve({ code, stderr }));
+    proc.on('error', reject);
+  });
+}
+
 function naturalSort(a, b) {
   const na = parseInt((a.match(/(\d+)/) || [0, 0])[1], 10);
   const nb = parseInt((b.match(/(\d+)/) || [0, 0])[1], 10);
@@ -350,6 +361,111 @@ function registerIPC() {
         bookId, chapters: book.chapters, ffmpegPath, tmpDir,
       });
     });
+  });
+
+  // ── Chapter splitting ────────────────────────────────────────────────────
+
+  ipcMain.handle('book:detectSilences', async (event, { bookId, silenceDuration, noiseFloor }) => {
+    const book = db.books[bookId];
+    if (!book) return { error: 'Book not found' };
+    if (book.chapters.length !== 1) return { error: 'Book must have exactly one file' };
+
+    let ffmpegPath;
+    try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
+    catch (e) { return { error: 'ffmpeg not available: ' + e.message }; }
+
+    const filePath = book.chapters[0].filepath;
+    event.sender.send('split:progress', { type: 'detecting', message: 'Analyzing audio for silences…' });
+
+    try {
+      const { stderr } = await spawnAsync(ffmpegPath, [
+        '-i', filePath,
+        '-af', `silencedetect=noise=${noiseFloor}dB:d=${silenceDuration}`,
+        '-f', 'null', '-',
+      ]);
+
+      const starts = [...stderr.matchAll(/silence_start:\s*([\d.]+)/g)].map(m => parseFloat(m[1]));
+      const ends   = [...stderr.matchAll(/silence_end:\s*([\d.]+)/g)].map(m => parseFloat(m[1]));
+
+      const splitPoints = [];
+      for (let i = 0; i < Math.min(starts.length, ends.length); i++) {
+        splitPoints.push((starts[i] + ends[i]) / 2);
+      }
+
+      let totalDuration = 0;
+      const dm = stderr.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
+      if (dm) totalDuration = parseInt(dm[1]) * 3600 + parseInt(dm[2]) * 60 + parseFloat(dm[3]);
+
+      return { splitPoints, totalDuration };
+    } catch (e) {
+      return { error: e.message };
+    }
+  });
+
+  ipcMain.handle('book:splitAtPoints', async (event, { bookId, splitPoints }) => {
+    const book = db.books[bookId];
+    if (!book) return { error: 'Book not found' };
+
+    let ffmpegPath;
+    try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
+    catch (e) { return { error: 'ffmpeg not available: ' + e.message }; }
+
+    const sourceFile = book.chapters[0].filepath;
+    const sourceDir  = path.dirname(sourceFile);
+    const sourceName = path.basename(sourceFile, path.extname(sourceFile));
+    const sourceExt  = path.extname(sourceFile);
+    const outDir = path.join(sourceDir, `${sourceName} - Chapters`);
+
+    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+
+    // Build ordered segment list: start times from [0, ...splitPoints]
+    const starts = [0, ...splitPoints];
+    const total  = starts.length;
+
+    for (let i = 0; i < total; i++) {
+      const segStart = starts[i];
+      const segEnd   = i < total - 1 ? starts[i + 1] : null;
+      const chNum    = String(i + 1).padStart(3, '0');
+      const outFile  = path.join(outDir, `Chapter ${chNum}${sourceExt}`);
+
+      event.sender.send('split:progress', {
+        type: 'splitting', current: i + 1, total,
+        message: `Splitting chapter ${i + 1} of ${total}…`,
+      });
+
+      const args = ['-y', '-ss', String(segStart), '-i', sourceFile];
+      if (segEnd !== null) args.push('-t', String(segEnd - segStart));
+      args.push('-c', 'copy', '-avoid_negative_ts', '1', outFile);
+
+      try {
+        const { code, stderr } = await spawnAsync(ffmpegPath, args);
+        if (code !== 0) return { error: `Chapter ${i + 1} failed: ${stderr.slice(-300)}` };
+      } catch (e) {
+        return { error: `Chapter ${i + 1} failed: ${e.message}` };
+      }
+    }
+
+    event.sender.send('split:progress', { type: 'importing', message: 'Updating library…' });
+
+    const audioExts = new Set(['.mp3', '.mp4', '.m4b', '.m4a', '.aac', '.ogg', '.wav', '.flac', '.opus']);
+    const newFiles = fs.readdirSync(outDir)
+      .filter(f => audioExts.has(path.extname(f).toLowerCase()))
+      .sort(naturalSort);
+
+    const chapters = newFiles.map((filename, idx) => ({
+      id: idx, filename,
+      filepath: path.join(outDir, filename),
+      title: chapterTitle(filename),
+      duration: 0,
+    }));
+
+    book.folderPath  = outDir;
+    book.chapters    = chapters;
+    book.chapterCount = chapters.length;
+    delete db.playback[bookId];
+    saveDb();
+
+    return { ...book, playback: null, chaptersCreated: chapters.length };
   });
 
   ipcMain.handle('transcript:get', (_e, bookId) => {

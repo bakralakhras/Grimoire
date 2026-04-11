@@ -564,12 +564,16 @@ async function showContextMenu(e, bookId) {
   const menu = $('ctx-menu');
   // Clamp so menu doesn't overflow the viewport
   menu.style.left = Math.min(e.clientX, window.innerWidth  - 210) + 'px';
-  menu.style.top  = Math.min(e.clientY, window.innerHeight - 260) + 'px';
+  menu.style.top  = Math.min(e.clientY, window.innerHeight - 280) + 'px';
 
-  hide($('ctx-view-transcript')); // hide until we confirm it exists
+  hide($('ctx-view-transcript'));
+
+  // Only show split option for single-file books
+  const book = S.books.find(b => b.id === bookId);
+  toggle($('ctx-split'), book?.chapterCount === 1);
+
   show(menu);
 
-  // Async file-existence check — nearly instant (local disk read)
   const transcript = await api.getTranscript(bookId);
   S.ctxTranscript = transcript;
   if (!menu.classList.contains('hidden')) {
@@ -768,6 +772,11 @@ function setupUI() {
     renderLibrary();
   });
 
+  $('ctx-split').addEventListener('click', () => {
+    hideContextMenu();
+    if (S.ctxBookId) openSplitModal(S.ctxBookId);
+  });
+
   $('ctx-set-bg').addEventListener('click', async () => {
     hideContextMenu();
     const book = S.books.find(b => b.id === S.ctxBookId);
@@ -884,12 +893,151 @@ function setupUI() {
   window.addEventListener('beforeunload', () => savePlayback());
 }
 
+// ── Chapter splitting ─────────────────────────────────────────────────────────
+
+const SENSITIVITY = {
+  low:    { duration: 2.5, noise: -30, desc: 'Conservative — detects breaks ≥2.5 s at −30 dB' },
+  medium: { duration: 1.5, noise: -35, desc: 'Balanced — detects breaks ≥1.5 s at −35 dB' },
+  high:   { duration: 0.8, noise: -40, desc: 'Aggressive — detects subtle breaks ≥0.8 s at −40 dB' },
+};
+
+const SPLIT = { bookId: null, sensitivity: 'medium', splitPoints: [] };
+
+function showSplitSection(id) {
+  ['split-cfg', 'split-detecting', 'split-warn-state', 'split-splitting-state', 'split-done-state']
+    .forEach(s => toggle($(s), s === id));
+}
+
+function openSplitModal(bookId) {
+  SPLIT.bookId = bookId;
+  SPLIT.sensitivity = 'medium';
+  SPLIT.splitPoints = [];
+  // Reset sensitivity UI
+  document.querySelectorAll('.sens-btn').forEach(b => b.classList.toggle('active', b.dataset.val === 'medium'));
+  $('split-sens-desc').textContent = SENSITIVITY.medium.desc;
+  showSplitSection('split-cfg');
+  show($('split-modal'));
+}
+
+function closeSplitModal() { hide($('split-modal')); }
+
+async function runSplitAnalysis() {
+  showSplitSection('split-detecting');
+  $('split-detect-msg').textContent = 'Analyzing audio for silences…';
+
+  api.onSplitProgress(data => {
+    if (data.type === 'detecting') $('split-detect-msg').textContent = data.message;
+  });
+
+  const cfg = SENSITIVITY[SPLIT.sensitivity];
+  const result = await api.detectSilences(SPLIT.bookId, { silenceDuration: cfg.duration, noiseFloor: cfg.noise });
+
+  if (result.error) {
+    closeSplitModal();
+    alert('Error detecting silences: ' + result.error);
+    return;
+  }
+
+  SPLIT.splitPoints = result.splitPoints;
+  const chapterCount = result.splitPoints.length + 1;
+
+  if (result.splitPoints.length < 2) {
+    // Too few — show warning
+    const msg = result.splitPoints.length === 0
+      ? 'No silence breaks detected. The audio may have no clear chapter boundaries at this sensitivity.'
+      : `Only ${chapterCount} chapter${chapterCount !== 1 ? 's' : ''} detected. This is likely too few.`;
+    $('split-warn-msg').textContent = msg;
+    // Disable "Split Anyway" if nothing to split
+    $('split-warn-proceed').disabled = result.splitPoints.length === 0;
+    $('split-warn-proceed').style.opacity = result.splitPoints.length === 0 ? '0.4' : '';
+    showSplitSection('split-warn-state');
+  } else {
+    // Looks good — proceed directly to splitting
+    await runSplitOperation();
+  }
+}
+
+async function runSplitOperation() {
+  showSplitSection('split-splitting-state');
+  $('split-prog-fill').style.width = '0%';
+
+  api.onSplitProgress(data => {
+    if (data.type === 'splitting') {
+      const pct = Math.round((data.current / data.total) * 100);
+      $('split-prog-fill').style.width = pct + '%';
+      $('split-split-msg').textContent = data.message;
+      $('split-split-sub').textContent = `${data.current} of ${data.total} chapters`;
+    } else if (data.type === 'importing') {
+      $('split-split-msg').textContent = data.message;
+      $('split-split-sub').textContent = '';
+      $('split-prog-fill').style.width = '100%';
+    }
+  });
+
+  const result = await api.splitAtPoints(SPLIT.bookId, SPLIT.splitPoints);
+
+  if (result.error) {
+    closeSplitModal();
+    alert('Split failed: ' + result.error);
+    return;
+  }
+
+  // Update in-memory book state
+  const idx = S.books.findIndex(b => b.id === SPLIT.bookId);
+  if (idx >= 0) S.books[idx] = result;
+
+  if (S.currentBook?.id === SPLIT.bookId) {
+    audio.pause();
+    audio.src = '';
+    S.isPlaying = false;
+    S.currentBook = result;
+    S.chapterIndex = 0;
+    renderChapterList();
+    updateNowPlayingDisplay();
+    updatePlayerBarInfo();
+    updatePlayButton(false);
+  }
+
+  $('split-done-msg').textContent = `Split into ${result.chaptersCreated} chapters successfully.`;
+  showSplitSection('split-done-state');
+}
+
+function setupSplitModal() {
+  // Sensitivity buttons
+  document.querySelectorAll('.sens-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      SPLIT.sensitivity = btn.dataset.val;
+      document.querySelectorAll('.sens-btn').forEach(b => b.classList.toggle('active', b === btn));
+      $('split-sens-desc').textContent = SENSITIVITY[SPLIT.sensitivity].desc;
+    });
+  });
+
+  $('split-cfg-cancel').addEventListener('click', closeSplitModal);
+  $('split-cfg-go').addEventListener('click', runSplitAnalysis);
+
+  $('split-warn-back').addEventListener('click', () => showSplitSection('split-cfg'));
+  $('split-warn-proceed').addEventListener('click', runSplitOperation);
+
+  $('split-done-close').addEventListener('click', () => {
+    closeSplitModal();
+    renderLibrary();
+  });
+
+  // Close on backdrop click (only in config state)
+  $('split-modal').addEventListener('click', e => {
+    if (e.target === $('split-modal') && !$('split-cfg').classList.contains('hidden')) {
+      closeSplitModal();
+    }
+  });
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
   setupAudio();
   setupSeekBars();
   setupKeys();
   setupUI();
+  setupSplitModal();
   updateVolSlider();
   await loadLibrary();
 }

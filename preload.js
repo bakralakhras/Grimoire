@@ -36,4 +36,12 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('transcribe:progress', (_e, data) => cb(data));
   },
   getTranscript: (bookId) => ipcRenderer.invoke('transcript:get', bookId),
+
+  // Chapter splitting
+  detectSilences: (bookId, opts) => ipcRenderer.invoke('book:detectSilences', { bookId, ...opts }),
+  splitAtPoints:  (bookId, splitPoints) => ipcRenderer.invoke('book:splitAtPoints', { bookId, splitPoints }),
+  onSplitProgress: (cb) => {
+    ipcRenderer.removeAllListeners('split:progress');
+    ipcRenderer.on('split:progress', (_e, data) => cb(data));
+  },
 });

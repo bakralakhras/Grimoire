@@ -233,11 +233,71 @@
     <button class="ctx-item" id="ctx-rename">✎ Rename</button>
     <button class="ctx-item" id="ctx-set-cover">⬡ Set Cover Art…</button>
     <button class="ctx-item" id="ctx-set-bg">▣ Set Background…</button>
+    <button class="ctx-item hidden" id="ctx-split">✂ Split into Chapters…</button>
     <button class="ctx-item" id="ctx-transcribe">◎ Transcribe…</button>
     <button class="ctx-item hidden" id="ctx-view-transcript">≡ View Transcript</button>
     <button class="ctx-item" id="ctx-reimport">↺ Re-import</button>
     <div class="ctx-divider"></div>
     <button class="ctx-item danger" id="ctx-delete">✕ Remove from library</button>
+  </div>
+
+  <!-- ── Split Chapters Modal ── -->
+  <div id="split-modal" class="modal-backdrop hidden">
+    <div class="modal glass split-modal-inner">
+      <h3>Split into Chapters</h3>
+
+      <!-- config state -->
+      <div class="split-state" id="split-cfg">
+        <p class="split-info">Grimoire will scan the audio for silences and split it into separate chapter files. The original file is kept as a backup.</p>
+        <div class="split-sens-wrap">
+          <span class="split-sens-label">Detection sensitivity</span>
+          <div class="split-sens-btns">
+            <button class="sens-btn" data-val="low">Low</button>
+            <button class="sens-btn active" data-val="medium">Medium</button>
+            <button class="sens-btn" data-val="high">High</button>
+          </div>
+          <p class="split-sens-desc" id="split-sens-desc">Balanced — detects breaks ≥1.5 s at −35 dB</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-ghost" id="split-cfg-cancel">Cancel</button>
+          <button class="btn-primary" id="split-cfg-go">Analyze Audio</button>
+        </div>
+      </div>
+
+      <!-- detecting state -->
+      <div class="split-state hidden" id="split-detecting">
+        <div class="split-spinner-wrap"><div class="split-spinner"></div></div>
+        <p id="split-detect-msg" class="split-center-msg">Analyzing audio for silences…</p>
+        <p class="split-subtext">This may take a moment for long files.</p>
+      </div>
+
+      <!-- warning state (too few chapters) -->
+      <div class="split-state hidden" id="split-warn-state">
+        <div class="split-warn-icon">⚠</div>
+        <p id="split-warn-msg" class="split-center-msg"></p>
+        <p class="split-subtext">Try increasing the sensitivity to detect more breaks, or split anyway.</p>
+        <div class="modal-footer">
+          <button class="btn-ghost" id="split-warn-back">← Back</button>
+          <button class="btn-primary" id="split-warn-proceed">Split Anyway</button>
+        </div>
+      </div>
+
+      <!-- splitting progress state -->
+      <div class="split-state hidden" id="split-splitting-state">
+        <p id="split-split-msg" class="split-center-msg">Splitting chapter 1…</p>
+        <div class="split-prog-track"><div class="split-prog-fill" id="split-prog-fill"></div></div>
+        <p class="split-subtext" id="split-split-sub"></p>
+      </div>
+
+      <!-- done state -->
+      <div class="split-state hidden" id="split-done-state">
+        <div class="split-done-icon">✓</div>
+        <p id="split-done-msg" class="split-center-msg"></p>
+        <div class="modal-footer">
+          <button class="btn-primary" id="split-done-close">Done</button>
+        </div>
+      </div>
+    </div>
   </div>
 
 </div>

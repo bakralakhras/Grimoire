@@ -38,7 +38,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.removeAllListeners('transcribe:progress');
     ipcRenderer.on('transcribe:progress', (_e, data) => cb(data));
   },
-  getTranscript: (bookId) => ipcRenderer.invoke('transcript:get', bookId),
+  getTranscript:      (bookId) => ipcRenderer.invoke('transcript:get', bookId),
+  getTranscriptWords: (bookId) => ipcRenderer.invoke('transcript:getWords', bookId),
 
   // Chapter splitting
   detectSilences: (bookId, opts) => ipcRenderer.invoke('book:detectSilences', { bookId, ...opts }),

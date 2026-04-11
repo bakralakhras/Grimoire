@@ -403,6 +403,10 @@ body {
   align-items: center;
   position: relative;
   overflow: hidden;
+  transition: padding-right 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+#player-view.panel-open {
+  padding-right: 500px;
 }
 
 /* Blurred full-bleed background — all rendering set by JS via cssText */
@@ -812,6 +816,99 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
   line-height: 1.75;
   color: var(--text-dim);
   white-space: pre-wrap;
+}
+
+/* ── Karaoke word highlighting ───────────────────────────────────────────────── */
+.tp-word {
+  display: inline;
+  transition: color 0.1s ease, font-weight 0.1s ease;
+  border-radius: 2px;
+}
+.tp-word.active {
+  color: #a855f7;
+  font-weight: 500;
+}
+
+/* Follow along pill button (used in both panel header and fullscreen header) */
+.tp-follow-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.tp-follow-btn:hover {
+  background: rgba(255,255,255,0.05);
+  color: var(--text-dim);
+  border-color: rgba(124, 58, 237, 0.35);
+}
+.tp-follow-btn.active {
+  background: rgba(124, 58, 237, 0.15);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: var(--accent-dim);
+}
+
+/* Transcript toggle button in player bar */
+#btn-transcript.tp-active { color: var(--accent); }
+
+/* ── Fullscreen reader ────────────────────────────────────────────────────────── */
+#reader-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  background: #0a0a0f;
+  display: flex;
+  flex-direction: column;
+}
+#reader-fullscreen.hidden { display: none; }
+
+.rfs-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 28px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+}
+.rfs-header h2 {
+  font-size: 18px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  margin: 0;
+}
+.rfs-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+.rfs-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 48px max(6%, calc(50% - 420px)) 80px;
+}
+.rfs-body .tp-chapter {
+  margin-bottom: 44px;
+}
+.rfs-body .tp-ch-heading {
+  font-size: 17px;
+  margin-bottom: 14px;
+  padding-bottom: 8px;
+}
+.rfs-body .tp-ch-text {
+  font-size: 18px;
+  line-height: 1.95;
+  color: rgba(232, 224, 208, 0.78);
 }
 
 /* ── Split chapters modal ───────────────────────────────────────────────────── */

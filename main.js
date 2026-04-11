@@ -61,6 +61,21 @@ async function findPython() {
   return null;
 }
 
+// Build a process.env copy with NVIDIA CUDA DLL directories prepended to PATH.
+// This ensures ctranslate2 / cuDNN DLLs are found even when Electron's PATH
+// doesn't include the Python site-packages nvidia subdirectories.
+function cudaEnv() {
+  const cudaDirs = [
+    'C:\\Users\\void_\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\nvidia\\cublas\\bin',
+    'C:\\Users\\void_\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\nvidia\\cudnn\\bin',
+    'C:\\Users\\void_\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\nvidia\\cuda_nvrtc\\bin',
+  ];
+  return {
+    ...process.env,
+    PATH: cudaDirs.join(path.delimiter) + path.delimiter + (process.env.PATH || ''),
+  };
+}
+
 function naturalSort(a, b) {
   const na = parseInt((a.match(/(\d+)/) || [0, 0])[1], 10);
   const nb = parseInt((b.match(/(\d+)/) || [0, 0])[1], 10);
@@ -367,7 +382,7 @@ function registerIPC() {
         '--mode',          'transcribe',
         '--chapters-json', JSON.stringify(chaptersArg),
         '--ffmpeg',        ffmpegPath,
-      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      ], { stdio: ['ignore', 'pipe', 'pipe'], env: cudaEnv() });
 
       let buf = '';
       let stderrBuf = '';
@@ -396,6 +411,14 @@ function registerIPC() {
               fs.writeFileSync(
                 path.join(transcriptsDir, `${bookId}_${msg.chapterIndex}.txt`), entry, 'utf8'
               );
+              // Persist word-timestamp data alongside the plain transcript
+              if (Array.isArray(msg.words) && msg.words.length) {
+                const wordsFile = path.join(transcriptsDir, `${bookId}_words.json`);
+                let wordsData = {};
+                try { wordsData = JSON.parse(fs.readFileSync(wordsFile, 'utf8')); } catch {}
+                wordsData[String(msg.chapterIndex)] = msg.words;
+                fs.writeFileSync(wordsFile, JSON.stringify(wordsData), 'utf8');
+              }
               event.sender.send('transcribe:progress', {
                 bookId,
                 type:         'chapter',
@@ -403,6 +426,7 @@ function registerIPC() {
                 total:        msg.total,
                 chapterTitle: msg.chapterTitle,
                 text:         msg.text,
+                words:        msg.words || [],
               });
             }
             // 'progress' (before text is ready) and 'result' need no special handling
@@ -562,6 +586,13 @@ function registerIPC() {
     return fs.readFileSync(fp, 'utf8');
   });
 
+  ipcMain.handle('transcript:getWords', (_e, bookId) => {
+    const fp = path.join(app.getPath('userData'), 'transcripts', `${bookId}_words.json`);
+    if (!fs.existsSync(fp)) return null;
+    try { return JSON.parse(fs.readFileSync(fp, 'utf8')); }
+    catch { return null; }
+  });
+
   // AI chapter detection — runs scripts/detect_chapters.py
   ipcMain.handle('book:detectChaptersAI', async (event, { bookId, silencePoints }) => {
     const book = db.books[bookId];
@@ -596,7 +627,7 @@ function registerIPC() {
         '--silences-json', JSON.stringify(silencePoints),
         '--clip-duration', '20',
         '--ffmpeg',        ffmpegPath,
-      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      ], { stdio: ['ignore', 'pipe', 'pipe'], env: cudaEnv() });
 
       let stdoutBuf = '';
       let stderrBuf = '';

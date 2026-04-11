@@ -91,7 +91,7 @@ def ffmpeg_to_wav(ffmpeg, src, dst, timeout=300):
 
 
 def transcribe_file(model, path, beam_size=5):
-    """Return transcribed text for a single audio file."""
+    """Return transcribed text for a single audio file (no word timestamps)."""
     segments, _ = model.transcribe(
         path,
         beam_size=beam_size,
@@ -99,6 +99,37 @@ def transcribe_file(model, path, beam_size=5):
         condition_on_previous_text=False,
     )
     return " ".join(seg.text.strip() for seg in segments if seg.text.strip())
+
+
+def transcribe_file_with_words(model, path, beam_size=5):
+    """Return (text, words) for a single audio file.
+
+    words is a list of {"word": str, "start": float, "end": float} dicts,
+    suitable for karaoke-style highlighting.  Each word.word from
+    faster-whisper includes any leading whitespace, which is preserved so
+    spans concatenate correctly in the browser.
+    """
+    segments, _ = model.transcribe(
+        path,
+        beam_size=beam_size,
+        language="en",
+        condition_on_previous_text=False,
+        word_timestamps=True,
+    )
+    words = []
+    text_parts = []
+    for seg in segments:
+        if not seg.text.strip():
+            continue
+        text_parts.append(seg.text.strip())
+        if seg.words:
+            for w in seg.words:
+                words.append({
+                    "word":  w.word,
+                    "start": round(w.start, 3),
+                    "end":   round(w.end,   3),
+                })
+    return " ".join(text_parts), words
 
 
 # ── Modes ─────────────────────────────────────────────────────────────────────
@@ -164,9 +195,10 @@ def run_transcribe(args, model):
             src = wav_path if ffmpeg_to_wav(args.ffmpeg, filepath, wav_path) else filepath
 
             try:
-                text = transcribe_file(model, src, beam_size=5)
+                text, words = transcribe_file_with_words(model, src, beam_size=5)
             except Exception as e:
-                text = f"[Transcription error: {e}]"
+                text  = f"[Transcription error: {e}]"
+                words = []
 
             emit({
                 "type":         "chapter",
@@ -174,6 +206,7 @@ def run_transcribe(args, model):
                 "total":        total,
                 "chapterTitle": title,
                 "text":         text,
+                "words":        words,
             })
 
     emit({"type": "result"})

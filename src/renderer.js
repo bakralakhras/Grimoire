@@ -29,6 +29,20 @@ const S = {
 // ── Audio ────────────────────────────────────────────────────────────────────
 const audio = new Audio();
 
+// ── Karaoke state ─────────────────────────────────────────────────────────────
+const KARAOKE = {
+  enabled:         false,
+  rafId:           null,
+  lastActive:      null,
+  // chapterIndex (number) → [{span, start, end}] sorted by start time
+  index:           {},
+  // All chapters appended so far — used to re-render in fullscreen
+  chapters:        [],   // [{num, title, text, words}]
+  loadedBookId:    null,
+  loadedBookTitle: '',
+  isFullscreen:    false,
+};
+
 // ── Utilities ────────────────────────────────────────────────────────────────
 function fmt(secs) {
   if (!secs || isNaN(secs)) return '0:00';
@@ -191,20 +205,147 @@ function openTranscriptPanel(book) {
   $('tp-status').textContent = '';
   $('tp-status').classList.remove('active');
   $('tp-body').innerHTML = '';
+  KARAOKE.chapters        = [];
+  KARAOKE.index           = {};
+  KARAOKE.lastActive      = null;
+  KARAOKE.loadedBookId    = book.id;
+  KARAOKE.loadedBookTitle = book.title;
   $('transcript-panel').classList.add('open');
+  $('player-view').classList.add('panel-open');
+  $('btn-transcript').classList.add('tp-active');
 }
 
 function closeTranscriptPanel() {
+  if (KARAOKE.isFullscreen) closeReaderFullscreen();
+  stopKaraoke();
   $('transcript-panel').classList.remove('open');
+  $('player-view').classList.remove('panel-open');
+  $('btn-transcript').classList.remove('tp-active');
 }
 
-function appendChapter(num, title, text) {
+// ── Karaoke helpers ───────────────────────────────────────────────────────────
+
+function _buildSectionIndex(chIdx, section) {
+  const entries = [];
+  section.querySelectorAll('.tp-word').forEach(span => {
+    entries.push({ span, start: parseFloat(span.dataset.start), end: parseFloat(span.dataset.end) });
+  });
+  KARAOKE.index[chIdx] = entries; // already in DOM order = start-time order
+}
+
+function _rebuildIndexFromContainer(container) {
+  KARAOKE.index = {};
+  if (KARAOKE.lastActive) { KARAOKE.lastActive.classList.remove('active'); KARAOKE.lastActive = null; }
+  const byChapter = {};
+  container.querySelectorAll('.tp-word[data-chapter]').forEach(span => {
+    const ci = parseInt(span.dataset.chapter, 10);
+    if (!byChapter[ci]) byChapter[ci] = [];
+    byChapter[ci].push({ span, start: parseFloat(span.dataset.start), end: parseFloat(span.dataset.end) });
+  });
+  Object.assign(KARAOKE.index, byChapter);
+}
+
+function _findWordAt(chIdx, t) {
+  const words = KARAOKE.index[chIdx];
+  if (!words || !words.length) return null;
+  if (t < words[0].start || t > words[words.length - 1].end) return null;
+  let lo = 0, hi = words.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const w = words[mid];
+    if (w.end <= t) lo = mid + 1;
+    else if (w.start > t) hi = mid - 1;
+    else return w.span;
+  }
+  return null;
+}
+
+function karaokeStep() {
+  if (!KARAOKE.enabled) return;
+  const span = _findWordAt(S.chapterIndex, audio.currentTime);
+  if (span !== KARAOKE.lastActive) {
+    if (KARAOKE.lastActive) KARAOKE.lastActive.classList.remove('active');
+    KARAOKE.lastActive = span;
+    if (span) {
+      span.classList.add('active');
+      span.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+  KARAOKE.rafId = requestAnimationFrame(karaokeStep);
+}
+
+function startKaraoke() {
+  KARAOKE.enabled = true;
+  if (KARAOKE.rafId) cancelAnimationFrame(KARAOKE.rafId);
+  KARAOKE.rafId = requestAnimationFrame(karaokeStep);
+  $('tp-follow-btn').classList.add('active');
+  $('rfs-follow-btn').classList.add('active');
+}
+
+function stopKaraoke() {
+  KARAOKE.enabled = false;
+  if (KARAOKE.rafId) { cancelAnimationFrame(KARAOKE.rafId); KARAOKE.rafId = null; }
+  if (KARAOKE.lastActive) { KARAOKE.lastActive.classList.remove('active'); KARAOKE.lastActive = null; }
+  $('tp-follow-btn').classList.remove('active');
+  $('rfs-follow-btn').classList.remove('active');
+}
+
+function toggleKaraoke() {
+  if (KARAOKE.enabled) stopKaraoke(); else startKaraoke();
+}
+
+// ── Fullscreen reader ─────────────────────────────────────────────────────────
+
+function _appendChapterToEl(container, num, title, text, words) {
+  const chIdx = num - 1;
   const section = document.createElement('div');
   section.className = 'tp-chapter';
-  section.innerHTML = `
-    <p class="tp-ch-heading">Chapter ${num}${title ? ': ' + escHtml(title) : ''}</p>
-    <p class="tp-ch-text">${escHtml(text || '(no text)')}</p>`;
-  $('tp-body').appendChild(section);
+
+  let textHTML;
+  if (words && words.length) {
+    textHTML = words.map(w =>
+      `<span class="tp-word" data-chapter="${chIdx}" data-start="${w.start}" data-end="${w.end}">${escHtml(w.word)}</span>`
+    ).join('');
+  } else {
+    textHTML = escHtml(text || '(no text)');
+  }
+
+  section.innerHTML =
+    `<p class="tp-ch-heading">Chapter ${num}${title ? ': ' + escHtml(title) : ''}</p>` +
+    `<p class="tp-ch-text">${textHTML}</p>`;
+  container.appendChild(section);
+
+  if (words && words.length) _buildSectionIndex(chIdx, section);
+}
+
+function openReaderFullscreen() {
+  const body = $('rfs-body');
+  body.innerHTML = '';
+  KARAOKE.index = {};
+  if (KARAOKE.lastActive) { KARAOKE.lastActive.classList.remove('active'); KARAOKE.lastActive = null; }
+
+  KARAOKE.chapters.forEach(ch => _appendChapterToEl(body, ch.num, ch.title, ch.text, ch.words));
+
+  $('rfs-title').textContent = KARAOKE.loadedBookTitle;
+  // Sync follow-along button state
+  $('rfs-follow-btn').classList.toggle('active', KARAOKE.enabled);
+
+  show($('reader-fullscreen'));
+  KARAOKE.isFullscreen = true;
+}
+
+function closeReaderFullscreen() {
+  hide($('reader-fullscreen'));
+  KARAOKE.isFullscreen = false;
+  // Rebuild karaoke index from the still-populated panel body
+  _rebuildIndexFromContainer($('tp-body'));
+}
+
+// ── Transcript rendering ──────────────────────────────────────────────────────
+
+function appendChapter(num, title, text, words) {
+  KARAOKE.chapters.push({ num, title, text, words });
+  _appendChapterToEl($('tp-body'), num, title, text, words);
   $('tp-body').scrollTop = $('tp-body').scrollHeight;
 }
 
@@ -214,7 +355,7 @@ function renderFullTranscript(fullText) {
   for (const section of sections) {
     const m = section.match(/^=== Chapter (\d+): (.*?) ===\n\n([\s\S]*)/);
     if (m) {
-      appendChapter(parseInt(m[1], 10), m[2].trim(), m[3].trim());
+      appendChapter(parseInt(m[1], 10), m[2].trim(), m[3].trim(), null);
     } else if (section.trim()) {
       const div = document.createElement('div');
       div.className = 'tp-chapter';
@@ -222,6 +363,49 @@ function renderFullTranscript(fullText) {
       $('tp-body').appendChild(div);
     }
   }
+}
+
+async function loadAndShowTranscript(book) {
+  const [transcript, wordsData] = await Promise.all([
+    api.getTranscript(book.id),
+    api.getTranscriptWords(book.id),
+  ]);
+  if (!transcript && !wordsData) return false;
+
+  openTranscriptPanel(book);
+  setTranscriptStatus('', false);
+
+  if (wordsData) {
+    for (let i = 0; i < book.chapters.length; i++) {
+      const chWords = wordsData[String(i)];
+      if (!chWords) continue;
+      const title = book.chapters[i].title;
+      const text  = chWords.map(w => w.word).join('');
+      appendChapter(i + 1, title, text, chWords);
+    }
+  } else {
+    renderFullTranscript(transcript);
+  }
+  return true;
+}
+
+async function toggleTranscriptPanel() {
+  if ($('transcript-panel').classList.contains('open')) {
+    closeTranscriptPanel();
+    return;
+  }
+  const book = S.currentBook;
+  if (!book) return;
+
+  // If we already have content for this book loaded, just re-open
+  if (KARAOKE.loadedBookId === book.id && $('tp-body').children.length > 0) {
+    $('transcript-panel').classList.add('open');
+    $('player-view').classList.add('panel-open');
+    $('btn-transcript').classList.add('tp-active');
+    return;
+  }
+
+  await loadAndShowTranscript(book);
 }
 
 function setTranscriptStatus(msg, active = false) {
@@ -1061,9 +1245,9 @@ function setupUI() {
         setTranscriptStatus(`Downloading model… ${data.pct}%`, true);
       } else {
         // type === 'chapter'
-        const { chapterIndex, total, chapterTitle, text } = data;
+        const { chapterIndex, total, chapterTitle, text, words } = data;
         setTranscriptStatus(`Transcribed chapter ${chapterIndex + 1} of ${total}…`, true);
-        appendChapter(chapterIndex + 1, chapterTitle, text);
+        appendChapter(chapterIndex + 1, chapterTitle, text, words || null);
       }
     });
 
@@ -1083,17 +1267,15 @@ function setupUI() {
     hideContextMenu();
     const book = S.books.find(b => b.id === S.ctxBookId);
     if (!book) return;
-
-    // Use the transcript cached during the context-menu check, or re-fetch
-    const transcript = S.ctxTranscript || await api.getTranscript(book.id);
-    if (!transcript) return;
-
-    openTranscriptPanel(book);
-    setTranscriptStatus('Saved transcript', false);
-    renderFullTranscript(transcript);
+    await loadAndShowTranscript(book);
   });
 
   $('tp-close').addEventListener('click', closeTranscriptPanel);
+  $('tp-expand').addEventListener('click', openReaderFullscreen);
+  $('tp-follow-btn').addEventListener('click', toggleKaraoke);
+  $('rfs-close').addEventListener('click', closeReaderFullscreen);
+  $('rfs-follow-btn').addEventListener('click', toggleKaraoke);
+  $('btn-transcript').addEventListener('click', toggleTranscriptPanel);
 
   $('ctx-reimport').addEventListener('click', async () => {
     hideContextMenu();

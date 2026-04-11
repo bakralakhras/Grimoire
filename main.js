@@ -40,6 +40,27 @@ function spawnAsync(bin, args) {
   });
 }
 
+// Returns { exe, args } where `spawn(exe, [...args, scriptPath, ...scriptArgs])` works.
+// Tries version-specific invocations first — faster-whisper's ctranslate2 has
+// known compatibility issues with Python 3.12+.
+async function findPython() {
+  const candidates = [
+    { exe: 'py',         args: ['-3.11'] },
+    { exe: 'py',         args: ['-3.10'] },
+    { exe: 'py',         args: ['-3.9']  },
+    { exe: 'python3.11', args: []        },
+    { exe: 'python',     args: []        },
+    { exe: 'py',         args: []        },
+  ];
+  for (const c of candidates) {
+    try {
+      const { code } = await spawnAsync(c.exe, [...c.args, '--version']);
+      if (code === 0) return c;
+    } catch { /* not found — try next */ }
+  }
+  return null;
+}
+
 function naturalSort(a, b) {
   const na = parseInt((a.match(/(\d+)/) || [0, 0])[1], 10);
   const nb = parseInt((b.match(/(\d+)/) || [0, 0])[1], 10);
@@ -319,47 +340,95 @@ function registerIPC() {
     try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
     catch (e) { return { error: 'ffmpeg not available: ' + e.message }; }
 
+    const scriptPath = path.join(__dirname, 'scripts', 'detect_chapters.py');
+    if (!fs.existsSync(scriptPath)) {
+      return { error: 'Transcription script not found. Reinstall Grimoire.' };
+    }
+
+    const python = await findPython();
+    if (!python) {
+      return { error: 'Python 3 is not installed or not in PATH.\n\nTranscription requires Python 3.9–3.11 and faster-whisper.\nInstall: pip install faster-whisper' };
+    }
+
     const transcriptsDir = path.join(app.getPath('userData'), 'transcripts');
     if (!fs.existsSync(transcriptsDir)) fs.mkdirSync(transcriptsDir, { recursive: true });
 
-    const tmpDir = path.join(app.getPath('temp'), 'grimoire-transcribe');
-    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-
-    const win = await getTranscribeWindow();
+    const chaptersArg = book.chapters.map((ch, i) => ({
+      index: i,
+      title: ch.title,
+      filepath: ch.filepath,
+    }));
 
     return new Promise((resolve) => {
+      const { spawn } = require('child_process');
+      const proc = spawn(python.exe, [
+        ...python.args,
+        scriptPath,
+        '--mode',          'transcribe',
+        '--chapters-json', JSON.stringify(chaptersArg),
+        '--ffmpeg',        ffmpegPath,
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      let buf = '';
+      let stderrBuf = '';
       const parts = [];
 
-      const onProgress = (_e, data) => {
-        if (data.bookId !== bookId) return;
-        // Forward progress to the renderer that requested transcription
-        event.sender.send('transcribe:progress', data);
-        // Persist completed chapters immediately
-        if (data.type === 'chapter') {
-          const entry = `=== Chapter ${data.chapterIndex + 1}: ${data.chapterTitle} ===\n\n${data.text}`;
-          parts[data.chapterIndex] = entry;
-          fs.writeFileSync(path.join(transcriptsDir, `${bookId}_${data.chapterIndex}.txt`), entry, 'utf8');
+      proc.stdout.on('data', chunk => {
+        buf += chunk.toString();
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const msg = JSON.parse(trimmed);
+            if (msg.type === 'loading') {
+              event.sender.send('transcribe:progress', { bookId, type: 'model_load' });
+            } else if (msg.type === 'device') {
+              event.sender.send('transcribe:progress', {
+                bookId, type: 'device',
+                device: msg.device, compute_type: msg.compute_type,
+              });
+            } else if (msg.type === 'chapter') {
+              // Chapter fully transcribed — persist and forward to renderer
+              const entry = `=== Chapter ${msg.chapterIndex + 1}: ${msg.chapterTitle} ===\n\n${msg.text}`;
+              parts[msg.chapterIndex] = entry;
+              fs.writeFileSync(
+                path.join(transcriptsDir, `${bookId}_${msg.chapterIndex}.txt`), entry, 'utf8'
+              );
+              event.sender.send('transcribe:progress', {
+                bookId,
+                type:         'chapter',
+                chapterIndex: msg.chapterIndex,
+                total:        msg.total,
+                chapterTitle: msg.chapterTitle,
+                text:         msg.text,
+              });
+            }
+            // 'progress' (before text is ready) and 'result' need no special handling
+          } catch { /* malformed line */ }
         }
-      };
-
-      const onDone = (_e, { bookId: doneId, error }) => {
-        if (doneId !== bookId) return;
-        ipcMain.off('transcribe:progress', onProgress);
-        ipcMain.off('transcribe:done', onDone);
-        try { fs.rmdirSync(tmpDir); } catch {}
-        if (error) { resolve({ error }); return; }
-        const fullTranscript = parts.join('\n\n---\n\n');
-        fs.writeFileSync(path.join(transcriptsDir, `${bookId}_full.txt`), fullTranscript, 'utf8');
-        resolve(fullTranscript);
-      };
-
-      ipcMain.on('transcribe:progress', onProgress);
-      ipcMain.on('transcribe:done', onDone);
-
-      // Kick off work in the hidden Chromium window
-      win.webContents.send('transcribe:start', {
-        bookId, chapters: book.chapters, ffmpegPath, tmpDir,
       });
+
+      proc.stderr.on('data', chunk => { stderrBuf += chunk.toString(); });
+
+      proc.on('close', code => {
+        if (code === 0) {
+          const fullTranscript = parts.filter(Boolean).join('\n\n---\n\n');
+          fs.writeFileSync(path.join(transcriptsDir, `${bookId}_full.txt`), fullTranscript, 'utf8');
+          resolve(fullTranscript);
+        } else {
+          const notInstalled = /No module named ['"]faster_whisper/i.test(stderrBuf)
+            || /ModuleNotFoundError/i.test(stderrBuf);
+          resolve({
+            error: notInstalled
+              ? 'faster-whisper is not installed.\n\nRun: pip install faster-whisper'
+              : (stderrBuf.slice(-400) || `Process exited with code ${code}`),
+          });
+        }
+      });
+
+      proc.on('error', err => resolve({ error: err.message }));
     });
   });
 
@@ -387,14 +456,33 @@ function registerIPC() {
       const starts = [...stderr.matchAll(/silence_start:\s*([\d.]+)/g)].map(m => parseFloat(m[1]));
       const ends   = [...stderr.matchAll(/silence_end:\s*([\d.]+)/g)].map(m => parseFloat(m[1]));
 
-      const splitPoints = [];
+      const rawPoints = [];
       for (let i = 0; i < Math.min(starts.length, ends.length); i++) {
-        splitPoints.push((starts[i] + ends[i]) / 2);
+        rawPoints.push((starts[i] + ends[i]) / 2);
       }
 
       let totalDuration = 0;
       const dm = stderr.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
       if (dm) totalDuration = parseInt(dm[1]) * 3600 + parseInt(dm[2]) * 60 + parseFloat(dm[3]);
+
+      // Filter out split points that would produce chapters shorter than 10 minutes.
+      // Walk the candidate list greedily: only keep a point if it is at least
+      // MIN_CHAPTER seconds after the previous kept boundary.  Then do a final
+      // pass to drop the last kept point if the trailing chapter would be too short.
+      const MIN_CHAPTER = 600; // seconds
+      const splitPoints = [];
+      let cursor = 0;
+      for (const pt of rawPoints) {
+        if (pt - cursor >= MIN_CHAPTER) {
+          splitPoints.push(pt);
+          cursor = pt;
+        }
+      }
+      // If the final chapter would be shorter than MIN_CHAPTER, drop its start point.
+      if (splitPoints.length > 0 && totalDuration > 0) {
+        const lastChapterLen = totalDuration - splitPoints[splitPoints.length - 1];
+        if (lastChapterLen < MIN_CHAPTER) splitPoints.pop();
+      }
 
       return { splitPoints, totalDuration };
     } catch (e) {
@@ -472,6 +560,113 @@ function registerIPC() {
     const fp = path.join(app.getPath('userData'), 'transcripts', `${bookId}_full.txt`);
     if (!fs.existsSync(fp)) return null;
     return fs.readFileSync(fp, 'utf8');
+  });
+
+  // AI chapter detection — runs scripts/detect_chapters.py
+  ipcMain.handle('book:detectChaptersAI', async (event, { bookId, silencePoints }) => {
+    const book = db.books[bookId];
+    if (!book) return { error: 'book_not_found', message: 'Book not found' };
+
+    let ffmpegPath;
+    try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
+    catch (e) { return { error: 'no_ffmpeg', message: 'ffmpeg not available' }; }
+
+    const scriptPath = path.join(__dirname, 'scripts', 'detect_chapters.py');
+    if (!fs.existsSync(scriptPath)) {
+      return { error: 'no_script', message: 'detect_chapters.py not found alongside main.js' };
+    }
+
+    const python = await findPython();
+    if (!python) {
+      return {
+        error: 'no_python',
+        message: 'Python 3 is not installed or not in PATH.',
+      };
+    }
+
+    const audioPath = book.chapters[0].filepath;
+
+    return new Promise((resolve) => {
+      const { spawn } = require('child_process');
+      const proc = spawn(python.exe, [
+        ...python.args,
+        scriptPath,
+        '--mode',          'chapters',
+        '--audio',         audioPath,
+        '--silences-json', JSON.stringify(silencePoints),
+        '--clip-duration', '20',
+        '--ffmpeg',        ffmpegPath,
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      let stdoutBuf = '';
+      let stderrBuf = '';
+      let finalResult = null;
+
+      proc.stdout.on('data', chunk => {
+        stdoutBuf += chunk.toString();
+        // Process all complete lines
+        const lines = stdoutBuf.split('\n');
+        stdoutBuf = lines.pop(); // keep any incomplete trailing line
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const msg = JSON.parse(trimmed);
+            if (msg.type === 'result' || msg.type === 'error') {
+              finalResult = msg;
+            } else {
+              // 'loading' / 'progress' — stream to renderer
+              event.sender.send('ai:progress', msg);
+            }
+          } catch { /* malformed line — ignore */ }
+        }
+      });
+
+      proc.stderr.on('data', chunk => { stderrBuf += chunk.toString(); });
+
+      proc.on('close', code => {
+        // Flush any remaining stdout line
+        if (stdoutBuf.trim()) {
+          try {
+            const msg = JSON.parse(stdoutBuf.trim());
+            if (msg.type === 'result' || msg.type === 'error') finalResult = msg;
+          } catch { /* ignore */ }
+        }
+
+        if (finalResult) {
+          if (finalResult.type === 'result') {
+            resolve({ confirmed: finalResult.confirmed });
+          } else {
+            resolve({ error: finalResult.code || 'script_error', message: finalResult.message });
+          }
+          return;
+        }
+
+        // Process exited without producing a JSON result — derive error from stderr
+        const notInstalled = /No module named ['"]faster_whisper/i.test(stderrBuf)
+          || /ModuleNotFoundError/i.test(stderrBuf);
+        resolve({
+          error: notInstalled ? 'not_installed' : 'process_failed',
+          message: notInstalled
+            ? 'faster-whisper is not installed. Run: pip install faster-whisper'
+            : (stderrBuf.slice(-400) || `Process exited with code ${code}`),
+        });
+      });
+
+      proc.on('error', err => {
+        resolve({ error: 'spawn_failed', message: err.message });
+      });
+    });
+  });
+
+  // Book rating (0.5–5.0, null to clear)
+  ipcMain.handle('book:setRating', (_e, { bookId, rating }) => {
+    if (db.books[bookId]) {
+      if (rating == null) delete db.books[bookId].rating;
+      else db.books[bookId].rating = rating;
+      saveDb();
+    }
+    return true;
   });
 
   // Update chapter duration (for accurate progress)

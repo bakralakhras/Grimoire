@@ -26,6 +26,9 @@ contextBridge.exposeInMainWorld('api', {
   deleteBookmark: (data) => ipcRenderer.invoke('bookmarks:delete', data),
   renameBookmark: (data) => ipcRenderer.invoke('bookmarks:rename', data),
 
+  // Rating
+  setRating: (data) => ipcRenderer.invoke('book:setRating', data),
+
   // Chapters
   updateChapterDuration: (data) => ipcRenderer.invoke('chapters:updateDuration', data),
 
@@ -43,5 +46,12 @@ contextBridge.exposeInMainWorld('api', {
   onSplitProgress: (cb) => {
     ipcRenderer.removeAllListeners('split:progress');
     ipcRenderer.on('split:progress', (_e, data) => cb(data));
+  },
+
+  // AI chapter detection
+  detectChaptersAI: (bookId, silencePoints) => ipcRenderer.invoke('book:detectChaptersAI', { bookId, silencePoints }),
+  onAIProgress: (cb) => {
+    ipcRenderer.removeAllListeners('ai:progress');
+    ipcRenderer.on('ai:progress', (_e, data) => cb(data));
   },
 });

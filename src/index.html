@@ -103,6 +103,13 @@
           <div id="now-playing-meta">
             <h1 id="now-title" class="serif"></h1>
             <h2 id="now-chapter"></h2>
+            <div id="now-stars">
+              <span class="si-now empty" data-pos="1">★</span>
+              <span class="si-now empty" data-pos="2">★</span>
+              <span class="si-now empty" data-pos="3">★</span>
+              <span class="si-now empty" data-pos="4">★</span>
+              <span class="si-now empty" data-pos="5">★</span>
+            </div>
             <div id="chapter-progress-row">
               <span id="ch-current">0:00</span>
               <div class="seek-track" id="ch-seek-track">
@@ -215,6 +222,38 @@
     </div>
   </div>
 
+  <!-- ── Rate Book Modal ── -->
+  <div id="rate-modal" class="modal-backdrop hidden">
+    <div class="modal glass rate-modal-inner">
+      <h3>Rate Book</h3>
+      <div id="rate-modal-stars" class="rate-stars-wrap">
+        <span class="si-rate empty" data-pos="1">★</span>
+        <span class="si-rate empty" data-pos="2">★</span>
+        <span class="si-rate empty" data-pos="3">★</span>
+        <span class="si-rate empty" data-pos="4">★</span>
+        <span class="si-rate empty" data-pos="5">★</span>
+      </div>
+      <p class="rate-val-label" id="rate-val-label">No rating</p>
+      <div class="modal-footer">
+        <button class="btn-ghost danger" id="rate-clear">Clear</button>
+        <button class="btn-ghost" id="rate-cancel">Cancel</button>
+        <button class="btn-primary" id="rate-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Rename Book Modal ── -->
+  <div id="rename-modal" class="modal-backdrop hidden">
+    <div class="modal glass">
+      <h3>Rename Book</h3>
+      <input type="text" id="rename-input" placeholder="Book title…" maxlength="200" autocomplete="off">
+      <div class="modal-footer">
+        <button class="btn-ghost" id="rename-cancel">Cancel</button>
+        <button class="btn-primary" id="rename-save">Save</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Add Bookmark Modal ── -->
   <div id="bm-modal" class="modal-backdrop hidden">
     <div class="modal glass">
@@ -231,6 +270,7 @@
   <div id="ctx-menu" class="ctx-menu hidden">
     <button class="ctx-item" id="ctx-open">▶ Open</button>
     <button class="ctx-item" id="ctx-rename">✎ Rename</button>
+    <button class="ctx-item" id="ctx-rate">☆ Rate…</button>
     <button class="ctx-item" id="ctx-set-cover">⬡ Set Cover Art…</button>
     <button class="ctx-item" id="ctx-set-bg">▣ Set Background…</button>
     <button class="ctx-item hidden" id="ctx-split">✂ Split into Chapters…</button>
@@ -249,15 +289,26 @@
       <!-- config state -->
       <div class="split-state" id="split-cfg">
         <p class="split-info">Grimoire will scan the audio for silences and split it into separate chapter files. The original file is kept as a backup.</p>
+
         <div class="split-sens-wrap">
-          <span class="split-sens-label">Detection sensitivity</span>
+          <span class="split-sens-label">Detection method</span>
+          <div class="split-sens-btns">
+            <button class="method-btn active" data-method="silence">Silence Only</button>
+            <button class="method-btn" data-method="ai">Smart Detection (AI)</button>
+          </div>
+          <p class="split-sens-desc" id="split-method-desc">Fast — splits at silence gaps only</p>
+        </div>
+
+        <div class="split-sens-wrap">
+          <span class="split-sens-label">Silence sensitivity</span>
           <div class="split-sens-btns">
             <button class="sens-btn" data-val="low">Low</button>
             <button class="sens-btn active" data-val="medium">Medium</button>
             <button class="sens-btn" data-val="high">High</button>
           </div>
-          <p class="split-sens-desc" id="split-sens-desc">Balanced — detects breaks ≥1.5 s at −35 dB</p>
+          <p class="split-sens-desc" id="split-sens-desc">Balanced — detects breaks ≥2.0 s at −30 dB</p>
         </div>
+
         <div class="modal-footer">
           <button class="btn-ghost" id="split-cfg-cancel">Cancel</button>
           <button class="btn-primary" id="split-cfg-go">Analyze Audio</button>
@@ -269,6 +320,23 @@
         <div class="split-spinner-wrap"><div class="split-spinner"></div></div>
         <p id="split-detect-msg" class="split-center-msg">Analyzing audio for silences…</p>
         <p class="split-subtext">This may take a moment for long files.</p>
+      </div>
+
+      <!-- AI verification state -->
+      <div class="split-state hidden" id="split-ai-state">
+        <p id="split-ai-msg" class="split-center-msg">Loading Whisper model…</p>
+        <div class="split-prog-track"><div class="split-prog-fill" id="split-ai-prog-fill"></div></div>
+        <p class="split-subtext" id="split-ai-sub"></p>
+      </div>
+
+      <!-- error state (Python / faster-whisper not found) -->
+      <div class="split-state hidden" id="split-error-state">
+        <div class="split-warn-icon">⚠</div>
+        <p id="split-error-msg" class="split-center-msg"></p>
+        <p class="split-error-sub" id="split-error-sub"></p>
+        <div class="modal-footer">
+          <button class="btn-ghost" id="split-error-back">← Back</button>
+        </div>
       </div>
 
       <!-- warning state (too few chapters) -->

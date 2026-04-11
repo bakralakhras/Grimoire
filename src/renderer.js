@@ -59,6 +59,115 @@ function initials(title) {
   return (title || '?').split(/\s+/).filter(w => w.length > 1).slice(0, 2).map(w => w[0].toUpperCase()).join('') || title[0].toUpperCase();
 }
 
+// ── Star rating helpers ───────────────────────────────────────────────────────
+function starsStaticHTML(rating) {
+  let html = '<div class="star-row">';
+  for (let i = 1; i <= 5; i++) {
+    if (rating >= i) html += '<span class="star star-full">★</span>';
+    else if (rating >= i - 0.5) html += '<span class="star star-half">★</span>';
+    else html += '<span class="star star-empty">★</span>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function starsInputHTML() {
+  return [1,2,3,4,5].map(i =>
+    `<span class="si empty" data-pos="${i}">★</span>`
+  ).join('') + '<span class="star-tip"></span>';
+}
+
+function renderStarElements(els, value) {
+  els.forEach((si, i) => {
+    const pos = i + 1;
+    const base = si.className.replace(/\s*(full|half|empty)/, '');
+    const state = value >= pos ? 'full' : (value >= pos - 0.5 ? 'half' : 'empty');
+    si.className = `${base} ${state}`;
+  });
+}
+
+function renderCardStars(card, value) {
+  const sis = Array.from(card.querySelectorAll('.book-stars-input .si'));
+  renderStarElements(sis, value);
+  const tip = card.querySelector('.star-tip');
+  if (tip) tip.textContent = value > 0 ? `${value}/5` : '';
+}
+
+async function rateBook(bookId, rating) {
+  await api.setRating({ bookId, rating });
+  const book = S.books.find(b => b.id === bookId);
+  if (book) book.rating = rating;
+  if (S.currentBook?.id === bookId) {
+    S.currentBook.rating = rating;
+    renderNowStars(rating);
+  }
+  renderLibrary();
+}
+
+async function clearRating(bookId) {
+  await api.setRating({ bookId, rating: null });
+  const book = S.books.find(b => b.id === bookId);
+  if (book) delete book.rating;
+  if (S.currentBook?.id === bookId) {
+    delete S.currentBook.rating;
+    renderNowStars(0);
+  }
+  renderLibrary();
+}
+
+function renderNowStars(value) {
+  const sis = Array.from($('now-stars').querySelectorAll('.si-now'));
+  renderStarElements(sis, value);
+}
+
+// Strip book-title noise from chapter filenames and format as "Chapter N".
+//
+// Handles two common audiobook naming patterns:
+//   "Book Title Series Blurb 007"  → "Chapter 7"   (trailing track number)
+//   "Book Title - Chapter Name"    → "Chapter Name" (meaningful subtitle)
+function cleanChapterTitle(rawTitle, bookTitle, index) {
+  let t = rawTitle.trim();
+
+  // 1. Strip book title prefix using alphanumeric-only comparison so punctuation is ignored.
+  //    "Morning Star Book III…" with book "Morning Star" → "Book III…"
+  if (bookTitle) {
+    const norm   = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normT  = norm(t);
+    const normB  = norm(bookTitle);
+    if (normB && normT.startsWith(normB)) {
+      // Walk the original string, counting alphanumeric chars until we've matched normB.length
+      let matched = 0;
+      let i = 0;
+      while (i < t.length && matched < normB.length) {
+        if (/[a-z0-9]/i.test(t[i])) matched++;
+        i++;
+      }
+      // Skip any trailing separator chars (space, dash, colon, etc.)
+      while (i < t.length && /[\s\-_:.,]/.test(t[i])) i++;
+      t = t.slice(i).trim();
+    }
+  }
+
+  // 2. Pure number (e.g. after stripping the prefix we get "007") → "Chapter N"
+  if (/^\d+$/.test(t)) return `Chapter ${parseInt(t, 10)}`;
+
+  // 3. Trailing number (e.g. "Book III of the Red Rising Trilogy 007" or
+  //    what's left after a partial strip) → "Chapter N"
+  const endNum = t.match(/\s(\d{1,4})\s*$/);
+  if (endNum) return `Chapter ${parseInt(endNum[1], 10)}`;
+
+  // 4. Explicit "Chapter N …" or "Ch. N …" prefix with a subtitle → just the subtitle
+  const chPfx = t.match(/^ch(?:apter)?\.?\s*(\d+)[\s\-:_.]+(.+)/i);
+  if (chPfx) return chPfx[2].trim();
+
+  // 5. Explicit "Chapter N" with no subtitle → normalise number
+  const chOnly = t.match(/^ch(?:apter)?\.?\s*(\d+)\s*$/i);
+  if (chOnly) return `Chapter ${parseInt(chOnly[1], 10)}`;
+
+  // 6. Nothing to clean — return as-is (it's already a meaningful chapter name)
+  return t || `Chapter ${index + 1}`;
+}
+
 function bookProgress(book) {
   const pb = book.playback;
   if (!pb || !book.chapters?.length) return 0;
@@ -157,7 +266,34 @@ function renderLibrary() {
 
   $('book-grid').querySelectorAll('.book-card').forEach(card => {
     const id = card.dataset.id;
-    card.addEventListener('click', () => openBook(id));
+    const book = S.books.find(b => b.id === id);
+
+    // Initialise input stars to current rating
+    renderCardStars(card, book?.rating || 0);
+
+    // Star hover & click
+    card.querySelectorAll('.book-stars-input .si').forEach(si => {
+      si.addEventListener('mousemove', e => {
+        const pos = parseInt(si.dataset.pos, 10);
+        const val = e.offsetX < si.offsetWidth / 2 ? pos - 0.5 : pos;
+        renderCardStars(card, val);
+      });
+    });
+    card.querySelector('.book-stars-input').addEventListener('mouseleave', () => {
+      renderCardStars(card, book?.rating || 0);
+    });
+
+    card.addEventListener('click', e => {
+      if (e.target.closest('.book-stars-input')) {
+        const si = e.target.closest('.si');
+        if (!si) return;
+        const pos = parseInt(si.dataset.pos, 10);
+        const val = e.offsetX < si.offsetWidth / 2 ? pos - 0.5 : pos;
+        rateBook(id, val);
+        return;
+      }
+      openBook(id);
+    });
     card.addEventListener('contextmenu', e => showContextMenu(e, id));
   });
 }
@@ -183,6 +319,8 @@ function bookCardHTML(book) {
     <div class="book-card-info">
       <p class="book-card-title">${book.title}</p>
       <p class="book-card-meta">${book.chapterCount} chapter${book.chapterCount !== 1 ? 's' : ''}</p>
+      ${book.rating ? `<div class="book-stars-static">${starsStaticHTML(book.rating)}</div>` : ''}
+      <div class="book-stars-input">${starsInputHTML()}</div>
       <div class="progress-bar"><div class="progress-fill-bar" style="width:${pct}%"></div></div>
       ${pct > 0 ? `<p class="progress-pct">${pct}%</p>` : ''}
     </div>
@@ -306,19 +444,37 @@ function updateNowPlayingDisplay() {
   }
 
   // ── Immersive blurred background ─────────────────────────────────────────
-  // Priority: custom bg > cover art > gradient derived from book colour
+  // Priority: custom bg > cover art > vivid hue-derived gradient.
+  // Use cssText to set all properties atomically — avoids cascade/ordering bugs.
   const bgSrc = book.bgPath || book.coverPath || null;
   const bg = $('player-bg');
   if (bgSrc) {
-    bg.style.backgroundImage = `url('${pathToUrl(bgSrc)}')`;
-    bg.style.background = '';
+    bg.style.cssText = [
+      'position:absolute', 'inset:-80px', 'z-index:0',
+      `background-image:url('${pathToUrl(bgSrc)}')`,
+      'background-size:cover', 'background-position:center',
+      'filter:blur(60px) brightness(0.25) saturate(1.4)',
+    ].join(';') + ';';
   } else {
-    bg.style.backgroundImage = '';
-    bg.style.background = col.bg;
+    // No image — derive a vivid gradient from book hue so colour shows at low brightness
+    let h = 5381;
+    for (let i = 0; i < book.title.length; i++) { h = ((h << 5) + h) ^ book.title.charCodeAt(i); h = h & h; }
+    const hue = Math.abs(h % 360);
+    bg.style.cssText = [
+      'position:absolute', 'inset:-80px', 'z-index:0',
+      `background-image:linear-gradient(145deg,hsl(${hue},70%,55%) 0%,hsl(${(hue+40)%360},60%,38%) 100%)`,
+      'background-size:cover',
+      'filter:blur(80px) brightness(0.38) saturate(1.6)',
+    ].join(';') + ';';
   }
 
   $('now-title').textContent = book.title;
-  $('now-chapter').textContent = chapter ? `Chapter ${S.chapterIndex + 1}: ${chapter.title}` : '';
+  const chapterLabel = book.chapters.length === 1
+    ? ''
+    : (chapter ? cleanChapterTitle(chapter.title, book.title, S.chapterIndex) : '');
+  $('now-chapter').textContent = chapterLabel;
+
+  renderNowStars(book.rating || 0);
 }
 
 function updatePlayerBarInfo() {
@@ -338,7 +494,9 @@ function updatePlayerBarInfo() {
   }
 
   $('pb-book-title').textContent = book.title;
-  $('pb-chapter-title').textContent = chapter ? chapter.title : '';
+  $('pb-chapter-title').textContent = (book.chapters.length > 1 && chapter)
+    ? cleanChapterTitle(chapter.title, book.title, S.chapterIndex)
+    : '';
 
   show($('player-bar'));
 }
@@ -418,12 +576,15 @@ function doSeek(e, track) {
 function renderChapterList() {
   const book = S.currentBook;
   if (!book) return;
-  $('chapter-list').innerHTML = book.chapters.map((ch, i) => `
+  $('chapter-list').innerHTML = book.chapters.map((ch, i) => {
+    const label = cleanChapterTitle(ch.title, book.title, i);
+    return `
     <div class="chapter-item${i === S.chapterIndex ? ' active' : ''}" data-index="${i}">
       <span class="chapter-num">${i + 1}</span>
-      <span class="chapter-name" title="${ch.title}">${ch.title}</span>
+      <span class="chapter-name" title="${label}">${label}</span>
       ${ch.duration ? `<span class="chapter-dur">${fmt(ch.duration)}</span>` : ''}
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   $('chapter-list').querySelectorAll('.chapter-item').forEach(el => {
     el.addEventListener('click', () => {
@@ -741,18 +902,106 @@ function setupUI() {
   // Context menu
   $('ctx-open').addEventListener('click', () => { hideContextMenu(); if (S.ctxBookId) openBook(S.ctxBookId); });
 
-  $('ctx-rename').addEventListener('click', async () => {
+  $('ctx-rename').addEventListener('click', () => {
     hideContextMenu();
     const book = S.books.find(b => b.id === S.ctxBookId);
     if (!book) return;
-    const newTitle = prompt('Rename book:', book.title);
-    if (newTitle?.trim()) {
-      await api.renameBook({ bookId: book.id, title: newTitle.trim() });
-      book.title = newTitle.trim();
-      if (S.currentBook?.id === book.id) S.currentBook.title = newTitle.trim();
-      renderLibrary();
-      if (S.currentBook?.id === book.id) updateNowPlayingDisplay();
+    $('rename-input').value = book.title;
+    show($('rename-modal'));
+    $('rename-input').select();
+  });
+
+  async function commitRename() {
+    const newTitle = $('rename-input').value.trim();
+    hide($('rename-modal'));
+    if (!newTitle) return;
+    const book = S.books.find(b => b.id === S.ctxBookId);
+    if (!book) return;
+    await api.renameBook({ bookId: book.id, title: newTitle });
+    book.title = newTitle;
+    if (S.currentBook?.id === book.id) {
+      S.currentBook.title = newTitle;
+      updateNowPlayingDisplay();
+      updatePlayerBarInfo();
     }
+    renderLibrary();
+  }
+
+  $('rename-save').addEventListener('click', commitRename);
+  $('rename-cancel').addEventListener('click', () => hide($('rename-modal')));
+  $('rename-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') commitRename();
+    if (e.key === 'Escape') hide($('rename-modal'));
+  });
+
+  // ── Rate modal ────────────────────────────────────────────────────────────
+  const RATE = { bookId: null, value: null };
+
+  function renderRateModal(value) {
+    renderStarElements(
+      Array.from($('rate-modal-stars').querySelectorAll('.si-rate')),
+      value || 0
+    );
+    $('rate-val-label').textContent = value ? `${value} / 5` : 'No rating';
+  }
+
+  $('ctx-rate').addEventListener('click', () => {
+    hideContextMenu();
+    const book = S.books.find(b => b.id === S.ctxBookId);
+    if (!book) return;
+    RATE.bookId = book.id;
+    RATE.value = book.rating || null;
+    renderRateModal(RATE.value);
+    show($('rate-modal'));
+  });
+
+  let _rateHover = null;
+  $('rate-modal-stars').querySelectorAll('.si-rate').forEach(si => {
+    si.addEventListener('mousemove', e => {
+      const pos = parseInt(si.dataset.pos, 10);
+      _rateHover = e.offsetX < si.offsetWidth / 2 ? pos - 0.5 : pos;
+      renderRateModal(_rateHover);
+    });
+    si.addEventListener('click', () => {
+      if (_rateHover !== null) {
+        RATE.value = _rateHover;
+        renderRateModal(RATE.value);
+      }
+    });
+  });
+  $('rate-modal-stars').addEventListener('mouseleave', () => {
+    _rateHover = null;
+    renderRateModal(RATE.value);
+  });
+
+  $('rate-save').addEventListener('click', async () => {
+    hide($('rate-modal'));
+    if (RATE.bookId && RATE.value != null) await rateBook(RATE.bookId, RATE.value);
+  });
+  $('rate-cancel').addEventListener('click', () => hide($('rate-modal')));
+  $('rate-clear').addEventListener('click', async () => {
+    hide($('rate-modal'));
+    if (RATE.bookId) await clearRating(RATE.bookId);
+  });
+  $('rate-modal').addEventListener('click', e => {
+    if (e.target === $('rate-modal')) hide($('rate-modal'));
+  });
+
+  // ── Now Playing star interaction ──────────────────────────────────────────
+  let _nowHover = null;
+  $('now-stars').querySelectorAll('.si-now').forEach(si => {
+    si.addEventListener('mousemove', e => {
+      const pos = parseInt(si.dataset.pos, 10);
+      _nowHover = e.offsetX < si.offsetWidth / 2 ? pos - 0.5 : pos;
+      renderNowStars(_nowHover);
+    });
+    si.addEventListener('click', () => {
+      if (S.currentBook && _nowHover != null) rateBook(S.currentBook.id, _nowHover);
+    });
+  });
+  $('now-stars').addEventListener('mouseleave', () => {
+    _nowHover = null;
+    renderNowStars(S.currentBook?.rating || 0);
   });
 
   $('ctx-set-cover').addEventListener('click', async () => {
@@ -803,6 +1052,11 @@ function setupUI() {
     api.onTranscribeProgress((data) => {
       if (data.type === 'model_load') {
         setTranscriptStatus('Loading Whisper model…', true);
+      } else if (data.type === 'device') {
+        const label = data.device === 'cuda'
+          ? `Running on GPU (${data.compute_type})`
+          : `Running on CPU (${data.compute_type})`;
+        setTranscriptStatus(label, true);
       } else if (data.type === 'model_download') {
         setTranscriptStatus(`Downloading model… ${data.pct}%`, true);
       } else {
@@ -896,22 +1150,32 @@ function setupUI() {
 // ── Chapter splitting ─────────────────────────────────────────────────────────
 
 const SENSITIVITY = {
-  low:    { duration: 2.5, noise: -30, desc: 'Conservative — detects breaks ≥2.5 s at −30 dB' },
-  medium: { duration: 1.5, noise: -35, desc: 'Balanced — detects breaks ≥1.5 s at −35 dB' },
-  high:   { duration: 0.8, noise: -40, desc: 'Aggressive — detects subtle breaks ≥0.8 s at −40 dB' },
+  low:    { duration: 3.0, noise: -25, desc: 'Conservative — detects breaks ≥3.0 s at −25 dB' },
+  medium: { duration: 2.0, noise: -30, desc: 'Balanced — detects breaks ≥2.0 s at −30 dB' },
+  high:   { duration: 1.0, noise: -35, desc: 'Aggressive — detects breaks ≥1.0 s at −35 dB' },
 };
 
-const SPLIT = { bookId: null, sensitivity: 'medium', splitPoints: [] };
+const SPLIT = { bookId: null, sensitivity: 'medium', method: 'silence', splitPoints: [] };
+
+const METHOD_DESC = {
+  silence: 'Fast — splits at silence gaps only',
+  ai:      'Accurate — uses Whisper AI to confirm each chapter break (requires Python + faster-whisper)',
+};
 
 function showSplitSection(id) {
-  ['split-cfg', 'split-detecting', 'split-warn-state', 'split-splitting-state', 'split-done-state']
+  ['split-cfg', 'split-detecting', 'split-ai-state', 'split-warn-state',
+   'split-splitting-state', 'split-done-state', 'split-error-state']
     .forEach(s => toggle($(s), s === id));
 }
 
 function openSplitModal(bookId) {
   SPLIT.bookId = bookId;
   SPLIT.sensitivity = 'medium';
+  SPLIT.method = 'silence';
   SPLIT.splitPoints = [];
+  // Reset method UI
+  document.querySelectorAll('.method-btn').forEach(b => b.classList.toggle('active', b.dataset.method === 'silence'));
+  $('split-method-desc').textContent = METHOD_DESC.silence;
   // Reset sensitivity UI
   document.querySelectorAll('.sens-btn').forEach(b => b.classList.toggle('active', b.dataset.val === 'medium'));
   $('split-sens-desc').textContent = SENSITIVITY.medium.desc;
@@ -939,20 +1203,70 @@ async function runSplitAnalysis() {
   }
 
   SPLIT.splitPoints = result.splitPoints;
-  const chapterCount = result.splitPoints.length + 1;
 
-  if (result.splitPoints.length < 2) {
-    // Too few — show warning
-    const msg = result.splitPoints.length === 0
-      ? 'No silence breaks detected. The audio may have no clear chapter boundaries at this sensitivity.'
-      : `Only ${chapterCount} chapter${chapterCount !== 1 ? 's' : ''} detected. This is likely too few.`;
+  // ── AI verification (optional) ───────────────────────────────────────────
+  if (SPLIT.method === 'ai' && result.splitPoints.length > 0) {
+    showSplitSection('split-ai-state');
+    $('split-ai-msg').textContent = 'Loading Whisper model…';
+    $('split-ai-sub').textContent = '(may download ~150 MB on first run)';
+    $('split-ai-prog-fill').style.width = '0%';
+
+    api.onAIProgress(data => {
+      if (data.type === 'loading') {
+        $('split-ai-msg').textContent = data.message;
+        $('split-ai-sub').textContent = '';
+      } else if (data.type === 'device') {
+        const label = data.device === 'cuda'
+          ? `GPU · ${data.compute_type}`
+          : `CPU · ${data.compute_type}`;
+        $('split-ai-sub').textContent = label;
+      } else if (data.type === 'progress') {
+        const pct = Math.round((data.current / data.total) * 100);
+        $('split-ai-prog-fill').style.width = pct + '%';
+        $('split-ai-msg').textContent = `Verifying clip ${data.current} of ${data.total}…`;
+        $('split-ai-sub').textContent = `Silence at ${fmt(data.timestamp)}`;
+      }
+    });
+
+    const aiResult = await api.detectChaptersAI(SPLIT.bookId, result.splitPoints);
+
+    if (aiResult.error) {
+      let msg, sub;
+      if (aiResult.error === 'not_installed') {
+        msg = 'faster-whisper is not installed.';
+        sub = 'Run: pip install faster-whisper';
+      } else if (aiResult.error === 'no_python') {
+        msg = 'Python 3 not found.';
+        sub = 'Install Python 3.8+ from python.org and add it to your PATH, then restart Grimoire.';
+      } else {
+        msg = 'AI detection failed.';
+        sub = aiResult.message || '';
+      }
+      $('split-error-msg').textContent = msg;
+      $('split-error-sub').textContent = sub;
+      showSplitSection('split-error-state');
+      return;
+    }
+
+    // Replace split points with only the AI-confirmed ones
+    SPLIT.splitPoints = aiResult.confirmed.map(c => c.timestamp);
+  }
+
+  // ── Check chapter count and proceed ──────────────────────────────────────
+  const chapterCount = SPLIT.splitPoints.length + 1;
+
+  if (SPLIT.splitPoints.length < 2) {
+    const baseMsg = SPLIT.method === 'ai'
+      ? `AI confirmed only ${chapterCount} chapter${chapterCount !== 1 ? 's' : ''}. `
+      : '';
+    const msg = SPLIT.splitPoints.length === 0
+      ? `${baseMsg}No chapter breaks detected. Try adjusting the sensitivity or switching methods.`
+      : `${baseMsg}Only ${chapterCount} chapter${chapterCount !== 1 ? 's' : ''} detected. This is likely too few.`;
     $('split-warn-msg').textContent = msg;
-    // Disable "Split Anyway" if nothing to split
-    $('split-warn-proceed').disabled = result.splitPoints.length === 0;
-    $('split-warn-proceed').style.opacity = result.splitPoints.length === 0 ? '0.4' : '';
+    $('split-warn-proceed').disabled = SPLIT.splitPoints.length === 0;
+    $('split-warn-proceed').style.opacity = SPLIT.splitPoints.length === 0 ? '0.4' : '';
     showSplitSection('split-warn-state');
   } else {
-    // Looks good — proceed directly to splitting
     await runSplitOperation();
   }
 }
@@ -1003,6 +1317,15 @@ async function runSplitOperation() {
 }
 
 function setupSplitModal() {
+  // Method buttons
+  document.querySelectorAll('.method-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      SPLIT.method = btn.dataset.method;
+      document.querySelectorAll('.method-btn').forEach(b => b.classList.toggle('active', b === btn));
+      $('split-method-desc').textContent = METHOD_DESC[SPLIT.method];
+    });
+  });
+
   // Sensitivity buttons
   document.querySelectorAll('.sens-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1016,6 +1339,7 @@ function setupSplitModal() {
   $('split-cfg-go').addEventListener('click', runSplitAnalysis);
 
   $('split-warn-back').addEventListener('click', () => showSplitSection('split-cfg'));
+  $('split-error-back').addEventListener('click', () => showSplitSection('split-cfg'));
   $('split-warn-proceed').addEventListener('click', runSplitOperation);
 
   $('split-done-close').addEventListener('click', () => {

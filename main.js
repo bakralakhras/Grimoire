@@ -593,8 +593,9 @@ function registerIPC() {
     catch { return null; }
   });
 
-  // AI chapter detection — runs scripts/detect_chapters.py
-  ipcMain.handle('book:detectChaptersAI', async (event, { bookId, silencePoints }) => {
+  // AI chapter detection — sliding-window scan via detect_chapters.py
+  // Transcribes a short clip every stepSeconds and checks for "chapter" in the text.
+  ipcMain.handle('book:detectChaptersAI', async (event, { bookId, stepSeconds = 480 }) => {
     const book = db.books[bookId];
     if (!book) return { error: 'book_not_found', message: 'Book not found' };
 
@@ -609,10 +610,7 @@ function registerIPC() {
 
     const python = await findPython();
     if (!python) {
-      return {
-        error: 'no_python',
-        message: 'Python 3 is not installed or not in PATH.',
-      };
+      return { error: 'no_python', message: 'Python 3 is not installed or not in PATH.' };
     }
 
     const audioPath = book.chapters[0].filepath;
@@ -624,7 +622,7 @@ function registerIPC() {
         scriptPath,
         '--mode',          'chapters',
         '--audio',         audioPath,
-        '--silences-json', JSON.stringify(silencePoints),
+        '--step-seconds',  String(stepSeconds),
         '--clip-duration', '20',
         '--ffmpeg',        ffmpegPath,
       ], { stdio: ['ignore', 'pipe', 'pipe'], env: cudaEnv() });
@@ -635,9 +633,8 @@ function registerIPC() {
 
       proc.stdout.on('data', chunk => {
         stdoutBuf += chunk.toString();
-        // Process all complete lines
         const lines = stdoutBuf.split('\n');
-        stdoutBuf = lines.pop(); // keep any incomplete trailing line
+        stdoutBuf = lines.pop();
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) continue;
@@ -646,7 +643,6 @@ function registerIPC() {
             if (msg.type === 'result' || msg.type === 'error') {
               finalResult = msg;
             } else {
-              // 'loading' / 'progress' — stream to renderer
               event.sender.send('ai:progress', msg);
             }
           } catch { /* malformed line — ignore */ }
@@ -656,7 +652,6 @@ function registerIPC() {
       proc.stderr.on('data', chunk => { stderrBuf += chunk.toString(); });
 
       proc.on('close', code => {
-        // Flush any remaining stdout line
         if (stdoutBuf.trim()) {
           try {
             const msg = JSON.parse(stdoutBuf.trim());
@@ -666,14 +661,13 @@ function registerIPC() {
 
         if (finalResult) {
           if (finalResult.type === 'result') {
-            resolve({ confirmed: finalResult.confirmed });
+            resolve({ confirmed: finalResult.confirmed, totalDuration: finalResult.duration || 0 });
           } else {
             resolve({ error: finalResult.code || 'script_error', message: finalResult.message });
           }
           return;
         }
 
-        // Process exited without producing a JSON result — derive error from stderr
         const notInstalled = /No module named ['"]faster_whisper/i.test(stderrBuf)
           || /ModuleNotFoundError/i.test(stderrBuf);
         resolve({
@@ -684,10 +678,66 @@ function registerIPC() {
         });
       });
 
-      proc.on('error', err => {
-        resolve({ error: 'spawn_failed', message: err.message });
-      });
+      proc.on('error', err => resolve({ error: 'spawn_failed', message: err.message }));
     });
+  });
+
+  // Known chapter count — detect ALL silences, rank by duration, keep top N-1.
+  ipcMain.handle('book:detectByCount', async (event, { bookId, chapterCount }) => {
+    const book = db.books[bookId];
+    if (!book) return { error: 'Book not found' };
+    if (book.chapters.length !== 1) return { error: 'Book must have exactly one file' };
+
+    let ffmpegPath;
+    try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
+    catch (e) { return { error: 'ffmpeg not available: ' + e.message }; }
+
+    const filePath = book.chapters[0].filepath;
+    event.sender.send('split:progress', { type: 'detecting', message: 'Scanning audio for silence gaps…' });
+
+    try {
+      // Broad silencedetect to catch even brief gaps — we rank by duration later.
+      const { stderr } = await spawnAsync(ffmpegPath, [
+        '-i', filePath,
+        '-af', 'silencedetect=noise=-30dB:d=0.3',
+        '-f', 'null', '-',
+      ]);
+
+      const starts = [...stderr.matchAll(/silence_start:\s*([\d.]+)/g)].map(m => parseFloat(m[1]));
+      const ends   = [...stderr.matchAll(/silence_end:\s*([\d.]+)/g)].map(m => parseFloat(m[1]));
+
+      let totalDuration = 0;
+      const dm = stderr.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
+      if (dm) totalDuration = parseInt(dm[1]) * 3600 + parseInt(dm[2]) * 60 + parseFloat(dm[3]);
+
+      // Build silence records with duration for ranking
+      const silences = [];
+      for (let i = 0; i < Math.min(starts.length, ends.length); i++) {
+        silences.push({
+          midpoint: (starts[i] + ends[i]) / 2,
+          duration: ends[i] - starts[i],
+        });
+      }
+
+      if (silences.length === 0) {
+        return { splitPoints: [], totalDuration, warning: 'No silence gaps found in audio.' };
+      }
+
+      const needed = Math.max(0, chapterCount - 1);
+      // Sort by silence duration descending → longest silences = most likely chapter breaks
+      const topSilences = silences
+        .sort((a, b) => b.duration - a.duration)
+        .slice(0, needed);
+
+      // Re-sort selected silences chronologically
+      const splitPoints = topSilences
+        .map(s => s.midpoint)
+        .sort((a, b) => a - b);
+
+      return { splitPoints, totalDuration };
+    } catch (e) {
+      return { error: e.message };
+    }
   });
 
   // Book rating (0.5–5.0, null to clear)

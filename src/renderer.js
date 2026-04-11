@@ -310,8 +310,17 @@ function _appendChapterToEl(container, num, title, text, words) {
     textHTML = escHtml(text || '(no text)');
   }
 
+  // Suppress the title suffix if it is just "Chapter N" / "Chapter 002" —
+  // the heading already starts with "Chapter N", repeating it is redundant.
+  const titleSuffix = (() => {
+    if (!title) return '';
+    const m = title.match(/^ch(?:apter)?\.?\s*0*(\d+)\s*$/i);
+    if (m && parseInt(m[1], 10) === num) return '';
+    return ': ' + escHtml(title);
+  })();
+
   section.innerHTML =
-    `<p class="tp-ch-heading">Chapter ${num}${title ? ': ' + escHtml(title) : ''}</p>` +
+    `<p class="tp-ch-heading">Chapter ${num}${titleSuffix}</p>` +
     `<p class="tp-ch-text">${textHTML}</p>`;
   container.appendChild(section);
 
@@ -516,8 +525,13 @@ async function openBook(bookId) {
   const book = await api.getBook(bookId);
   if (!book) return;
 
-  // Check if folder still exists (simple heuristic)
   S.currentBook = book;
+
+  // If the transcript panel is open showing a different book, close it so
+  // stale content from the previous book is never visible while playing this one.
+  if ($('transcript-panel').classList.contains('open') && KARAOKE.loadedBookId !== book.id) {
+    closeTranscriptPanel();
+  }
 
   const pb = book.playback;
   S.chapterIndex = pb?.chapterIndex || 0;
@@ -994,11 +1008,11 @@ function setupKeys() {
         break;
       case 'ArrowLeft':
         e.preventDefault();
-        skip(-30);
+        skip(-10);
         break;
       case 'ArrowRight':
         e.preventDefault();
-        skip(30);
+        skip(10);
         break;
       case 'ArrowUp':
         e.preventDefault();
@@ -1043,8 +1057,8 @@ function setupUI() {
   $('btn-play').addEventListener('click', togglePlay);
   $('btn-prev').addEventListener('click', prevChapter);
   $('btn-next').addEventListener('click', nextChapter);
-  $('btn-skip-back').addEventListener('click', () => skip(-30));
-  $('btn-skip-fwd').addEventListener('click', () => skip(30));
+  $('btn-skip-back').addEventListener('click', () => skip(-10));
+  $('btn-skip-fwd').addEventListener('click', () => skip(10));
 
   // Volume
   $('vol-slider').addEventListener('input', e => {
@@ -1337,57 +1351,87 @@ const SENSITIVITY = {
   high:   { duration: 1.0, noise: -35, desc: 'Aggressive — detects breaks ≥1.0 s at −35 dB' },
 };
 
-const SPLIT = { bookId: null, sensitivity: 'medium', method: 'silence', splitPoints: [] };
+const SPLIT = {
+  bookId:        null,
+  sensitivity:   'medium',
+  method:        'silence',
+  chapterCount:  10,
+  splitPoints:   [],
+  totalDuration: 0,
+};
 
 const METHOD_DESC = {
   silence: 'Fast — splits at silence gaps only',
-  ai:      'Accurate — uses Whisper AI to confirm each chapter break (requires Python + faster-whisper)',
+  ai:      'Accurate — Whisper AI scans every 8 min for "Chapter…" announcements (requires Python + faster-whisper)',
+  count:   'Reliable — you supply the count; picks the N−1 longest silence gaps',
 };
 
+const SPLIT_SECTIONS = [
+  'split-cfg', 'split-detecting', 'split-ai-state', 'split-preview-state',
+  'split-warn-state', 'split-splitting-state', 'split-done-state', 'split-error-state',
+];
+
 function showSplitSection(id) {
-  ['split-cfg', 'split-detecting', 'split-ai-state', 'split-warn-state',
-   'split-splitting-state', 'split-done-state', 'split-error-state']
-    .forEach(s => toggle($(s), s === id));
+  SPLIT_SECTIONS.forEach(s => toggle($(s), s === id));
+}
+
+function _setSplitMethod(method) {
+  SPLIT.method = method;
+  document.querySelectorAll('.method-btn').forEach(b => b.classList.toggle('active', b.dataset.method === method));
+  $('split-method-desc').textContent = METHOD_DESC[method];
+  // Show/hide sensitivity and count sections based on method
+  toggle($('split-sensitivity-wrap'), method === 'silence');
+  toggle($('split-count-wrap'),       method === 'count');
 }
 
 function openSplitModal(bookId) {
   SPLIT.bookId = bookId;
-  SPLIT.sensitivity = 'medium';
-  SPLIT.method = 'silence';
   SPLIT.splitPoints = [];
-  // Reset method UI
-  document.querySelectorAll('.method-btn').forEach(b => b.classList.toggle('active', b.dataset.method === 'silence'));
-  $('split-method-desc').textContent = METHOD_DESC.silence;
-  // Reset sensitivity UI
+  SPLIT.totalDuration = 0;
+  _setSplitMethod('silence');
   document.querySelectorAll('.sens-btn').forEach(b => b.classList.toggle('active', b.dataset.val === 'medium'));
+  SPLIT.sensitivity = 'medium';
   $('split-sens-desc').textContent = SENSITIVITY.medium.desc;
+  $('split-count-input').value = String(SPLIT.chapterCount);
   showSplitSection('split-cfg');
   show($('split-modal'));
 }
 
 function closeSplitModal() { hide($('split-modal')); }
 
-async function runSplitAnalysis() {
-  showSplitSection('split-detecting');
-  $('split-detect-msg').textContent = 'Analyzing audio for silences…';
+function showPreview() {
+  const count = SPLIT.splitPoints.length + 1;
+  $('split-preview-count').textContent = count;
 
-  api.onSplitProgress(data => {
-    if (data.type === 'detecting') $('split-detect-msg').textContent = data.message;
+  const list = $('split-preview-list');
+  list.innerHTML = '';
+  const starts = [0, ...SPLIT.splitPoints];
+  starts.forEach((start, i) => {
+    const end = i < SPLIT.splitPoints.length ? SPLIT.splitPoints[i] : SPLIT.totalDuration;
+    const dur = end > 0 ? end - start : 0;
+    const item = document.createElement('div');
+    item.className = 'split-preview-item';
+    item.innerHTML =
+      `<span class="split-preview-chnum">Chapter ${i + 1}</span>` +
+      `<span class="split-preview-ts">${fmt(start)}</span>` +
+      (dur > 0 ? `<span class="split-preview-dur">${fmt(dur)}</span>` : '');
+    list.appendChild(item);
   });
 
-  const cfg = SENSITIVITY[SPLIT.sensitivity];
-  const result = await api.detectSilences(SPLIT.bookId, { silenceDuration: cfg.duration, noiseFloor: cfg.noise });
+  showSplitSection('split-preview-state');
+}
 
-  if (result.error) {
-    closeSplitModal();
-    alert('Error detecting silences: ' + result.error);
-    return;
-  }
+function showSplitWarn(msg) {
+  $('split-warn-msg').textContent = msg;
+  const canProceed = SPLIT.splitPoints.length > 0;
+  $('split-warn-proceed').disabled = !canProceed;
+  $('split-warn-proceed').style.opacity = canProceed ? '' : '0.4';
+  showSplitSection('split-warn-state');
+}
 
-  SPLIT.splitPoints = result.splitPoints;
-
-  // ── AI verification (optional) ───────────────────────────────────────────
-  if (SPLIT.method === 'ai' && result.splitPoints.length > 0) {
+async function runSplitAnalysis() {
+  if (SPLIT.method === 'ai') {
+    // ── Smart Scan (AI) — sliding window via Python/Whisper ───────────────────
     showSplitSection('split-ai-state');
     $('split-ai-msg').textContent = 'Loading Whisper model…';
     $('split-ai-sub').textContent = '(may download ~150 MB on first run)';
@@ -1395,22 +1439,20 @@ async function runSplitAnalysis() {
 
     api.onAIProgress(data => {
       if (data.type === 'loading') {
-        $('split-ai-msg').textContent = data.message;
+        $('split-ai-msg').textContent = 'Loading Whisper model…';
         $('split-ai-sub').textContent = '';
       } else if (data.type === 'device') {
-        const label = data.device === 'cuda'
+        $('split-ai-sub').textContent = data.device === 'cuda'
           ? `GPU · ${data.compute_type}`
           : `CPU · ${data.compute_type}`;
-        $('split-ai-sub').textContent = label;
       } else if (data.type === 'progress') {
         const pct = Math.round((data.current / data.total) * 100);
         $('split-ai-prog-fill').style.width = pct + '%';
-        $('split-ai-msg').textContent = `Verifying clip ${data.current} of ${data.total}…`;
-        $('split-ai-sub').textContent = `Silence at ${fmt(data.timestamp)}`;
+        $('split-ai-msg').textContent = `Scanning ${fmt(data.timestamp)} / ${fmt(data.duration)}`;
       }
     });
 
-    const aiResult = await api.detectChaptersAI(SPLIT.bookId, result.splitPoints);
+    const aiResult = await api.detectChaptersAI(SPLIT.bookId);
 
     if (aiResult.error) {
       let msg, sub;
@@ -1419,9 +1461,9 @@ async function runSplitAnalysis() {
         sub = 'Run: pip install faster-whisper';
       } else if (aiResult.error === 'no_python') {
         msg = 'Python 3 not found.';
-        sub = 'Install Python 3.8+ from python.org and add it to your PATH, then restart Grimoire.';
+        sub = 'Install Python 3.9–3.11 and add it to PATH, then restart Grimoire.';
       } else {
-        msg = 'AI detection failed.';
+        msg = 'AI scan failed.';
         sub = aiResult.message || '';
       }
       $('split-error-msg').textContent = msg;
@@ -1430,26 +1472,48 @@ async function runSplitAnalysis() {
       return;
     }
 
-    // Replace split points with only the AI-confirmed ones
-    SPLIT.splitPoints = aiResult.confirmed.map(c => c.timestamp);
+    SPLIT.splitPoints   = aiResult.confirmed.map(c => c.timestamp);
+    SPLIT.totalDuration = aiResult.totalDuration || 0;
+
+  } else if (SPLIT.method === 'count') {
+    // ── Known chapter count — rank silences by duration ───────────────────────
+    showSplitSection('split-detecting');
+    $('split-detect-msg').textContent = 'Scanning audio for silence gaps…';
+
+    api.onSplitProgress(data => {
+      if (data.type === 'detecting') $('split-detect-msg').textContent = data.message;
+    });
+
+    const count = parseInt($('split-count-input').value, 10) || 10;
+    SPLIT.chapterCount = count;
+    const result = await api.detectByCount(SPLIT.bookId, count);
+
+    if (result.error) { closeSplitModal(); alert('Error: ' + result.error); return; }
+    SPLIT.splitPoints   = result.splitPoints;
+    SPLIT.totalDuration = result.totalDuration;
+
+  } else {
+    // ── Silence Only ──────────────────────────────────────────────────────────
+    showSplitSection('split-detecting');
+    $('split-detect-msg').textContent = 'Analyzing audio for silences…';
+
+    api.onSplitProgress(data => {
+      if (data.type === 'detecting') $('split-detect-msg').textContent = data.message;
+    });
+
+    const cfg    = SENSITIVITY[SPLIT.sensitivity];
+    const result = await api.detectSilences(SPLIT.bookId, { silenceDuration: cfg.duration, noiseFloor: cfg.noise });
+
+    if (result.error) { closeSplitModal(); alert('Error: ' + result.error); return; }
+    SPLIT.splitPoints   = result.splitPoints;
+    SPLIT.totalDuration = result.totalDuration;
   }
 
-  // ── Check chapter count and proceed ──────────────────────────────────────
-  const chapterCount = SPLIT.splitPoints.length + 1;
-
-  if (SPLIT.splitPoints.length < 2) {
-    const baseMsg = SPLIT.method === 'ai'
-      ? `AI confirmed only ${chapterCount} chapter${chapterCount !== 1 ? 's' : ''}. `
-      : '';
-    const msg = SPLIT.splitPoints.length === 0
-      ? `${baseMsg}No chapter breaks detected. Try adjusting the sensitivity or switching methods.`
-      : `${baseMsg}Only ${chapterCount} chapter${chapterCount !== 1 ? 's' : ''} detected. This is likely too few.`;
-    $('split-warn-msg').textContent = msg;
-    $('split-warn-proceed').disabled = SPLIT.splitPoints.length === 0;
-    $('split-warn-proceed').style.opacity = SPLIT.splitPoints.length === 0 ? '0.4' : '';
-    showSplitSection('split-warn-state');
+  // ── Show preview or warn ──────────────────────────────────────────────────
+  if (SPLIT.splitPoints.length === 0) {
+    showSplitWarn('No chapter breaks detected. Try adjusting the settings or switching methods.');
   } else {
-    await runSplitOperation();
+    showPreview();
   }
 }
 
@@ -1478,7 +1542,6 @@ async function runSplitOperation() {
     return;
   }
 
-  // Update in-memory book state
   const idx = S.books.findIndex(b => b.id === SPLIT.bookId);
   if (idx >= 0) S.books[idx] = result;
 
@@ -1501,11 +1564,7 @@ async function runSplitOperation() {
 function setupSplitModal() {
   // Method buttons
   document.querySelectorAll('.method-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      SPLIT.method = btn.dataset.method;
-      document.querySelectorAll('.method-btn').forEach(b => b.classList.toggle('active', b === btn));
-      $('split-method-desc').textContent = METHOD_DESC[SPLIT.method];
-    });
+    btn.addEventListener('click', () => _setSplitMethod(btn.dataset.method));
   });
 
   // Sensitivity buttons
@@ -1517,12 +1576,20 @@ function setupSplitModal() {
     });
   });
 
+  // Chapter count input — clamp on blur
+  $('split-count-input').addEventListener('blur', () => {
+    const v = parseInt($('split-count-input').value, 10);
+    $('split-count-input').value = String(Math.max(2, Math.min(500, isNaN(v) ? 10 : v)));
+  });
+
   $('split-cfg-cancel').addEventListener('click', closeSplitModal);
   $('split-cfg-go').addEventListener('click', runSplitAnalysis);
 
   $('split-warn-back').addEventListener('click', () => showSplitSection('split-cfg'));
-  $('split-error-back').addEventListener('click', () => showSplitSection('split-cfg'));
   $('split-warn-proceed').addEventListener('click', runSplitOperation);
+  $('split-error-back').addEventListener('click', () => showSplitSection('split-cfg'));
+  $('split-preview-back').addEventListener('click', () => showSplitSection('split-cfg'));
+  $('split-preview-go').addEventListener('click', runSplitOperation);
 
   $('split-done-close').addEventListener('click', () => {
     closeSplitModal();

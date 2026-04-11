@@ -4,22 +4,24 @@ detect_chapters.py — Whisper-powered audio analysis for Grimoire.
 Modes
 -----
 chapters   (default)
-    For each silence midpoint, extract a short clip and check whether its
-    transcription opens with "chapter".  Outputs confirmed split points.
+    Sliding-window scan: extract a short clip every --step-seconds and check
+    whether the transcription contains "chapter" anywhere (case-insensitive).
+    Detections within 2 minutes of each other are merged (earliest kept).
+    No silence pre-detection required.
 
 transcribe
-    Transcribe a list of audio chapter files in full and return the text.
-    Replaces the broken @xenova/transformers path.
+    Transcribe a list of audio chapter files in full and return the text
+    with per-word timestamps for karaoke-style highlighting.
 
 Usage
 -----
 chapters mode:
     python detect_chapters.py
-        --mode         chapters
-        --audio        <source file>
-        --silences-json <JSON array of silence midpoint floats>
-        --clip-duration 20          (seconds around each midpoint)
-        --ffmpeg       <ffmpeg binary path>
+        --mode          chapters
+        --audio         <source file>
+        --step-seconds  480         (seconds between scan windows; default 8 min)
+        --clip-duration 20          (seconds per window)
+        --ffmpeg        <ffmpeg binary path>
 
 transcribe mode:
     python detect_chapters.py
@@ -31,11 +33,11 @@ Output (newline-delimited JSON on stdout)
 -----------------------------------------
 {"type": "loading",  "message": "..."}
 {"type": "device",   "device": "cuda"|"cpu", "compute_type": "float16"|"int8"}
-{"type": "progress", "current": 1, "total": 5, "timestamp": 123.4}   # chapters mode
-{"type": "progress", "chapterIndex": 0, "total": 5, "chapterTitle": "..."}  # transcribe mode
-{"type": "chapter",  "chapterIndex": 0, "total": 5, "chapterTitle": "...", "text": "..."}
-{"type": "result",   "confirmed": [...]}   # chapters mode
-{"type": "result"}                         # transcribe mode
+{"type": "progress", "current": 1, "total": 5, "timestamp": 123.4, "duration": 3600.0}  # chapters
+{"type": "progress", "chapterIndex": 0, "total": 5, "chapterTitle": "..."}              # transcribe
+{"type": "chapter",  "chapterIndex": 0, "total": 5, "chapterTitle": "...", "text": "...", "words": [...]}
+{"type": "result",   "confirmed": [...], "duration": 3600.0}  # chapters mode
+{"type": "result"}                                             # transcribe mode
 
 Fatal errors:
 {"type": "error", "code": "not_installed"|"other", "message": "..."}
@@ -45,6 +47,7 @@ exit(1)
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -74,7 +77,6 @@ def load_model():
         emit({"type": "device", "device": "cuda", "compute_type": "float16"})
         return model
     except Exception as cuda_err:
-        # CUDA init failed — fall back to CPU with int8 quantisation.
         emit({"type": "device", "device": "cpu", "compute_type": "int8",
               "fallback_reason": str(cuda_err)})
         return WhisperModel("base", device="cpu", compute_type="int8")
@@ -88,6 +90,21 @@ def ffmpeg_to_wav(ffmpeg, src, dst, timeout=300):
         timeout=timeout,
     )
     return result.returncode == 0 and os.path.isfile(dst)
+
+
+def get_duration(ffmpeg, src):
+    """Return audio duration in seconds by running ffmpeg -i. Returns 0 on failure."""
+    result = subprocess.run(
+        [ffmpeg, "-i", src, "-f", "null", "-"],
+        capture_output=True, timeout=60,
+    )
+    m = re.search(
+        r"Duration:\s*(\d+):(\d+):([\d.]+)",
+        result.stderr.decode("utf-8", errors="ignore"),
+    )
+    if not m:
+        return 0.0
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
 
 
 def transcribe_file(model, path, beam_size=5):
@@ -134,25 +151,50 @@ def transcribe_file_with_words(model, path, beam_size=5):
 
 # ── Modes ─────────────────────────────────────────────────────────────────────
 
-def run_chapters(args, model):
-    """Clip-and-check mode: confirm silence points that transcribe as 'Chapter …'."""
-    silence_points = json.loads(args.silences_json)
-    if not silence_points:
-        emit({"type": "result", "confirmed": []})
+def run_scan(args, model):
+    """Sliding-window scan: transcribe short clips at regular intervals and look
+    for a 'chapter' announcement anywhere in the text.  No silence detection
+    needed — just a regular time grid.
+
+    merge gap: detections within 2 minutes of each other → keep earliest.
+    """
+    duration = get_duration(args.ffmpeg, args.audio)
+    if duration <= 0:
+        emit({"type": "error", "code": "other",
+              "message": "Could not determine audio duration."})
+        sys.exit(1)
+
+    step = args.step_seconds
+    half = args.clip_duration / 2.0
+
+    # Window positions: step, 2*step, … up to (duration - half).
+    # Skip position 0 — that is the book start, never a chapter boundary.
+    positions = []
+    t = step
+    while t < duration - half:
+        positions.append(t)
+        t += step
+
+    total = len(positions)
+    if total == 0:
+        emit({"type": "result", "confirmed": [], "duration": duration})
         return
 
-    half = args.clip_duration / 2.0
     confirmed = []
-    total = len(silence_points)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        for idx, midpoint in enumerate(silence_points):
-            emit({"type": "progress", "current": idx + 1, "total": total, "timestamp": midpoint})
+        for idx, pos in enumerate(positions):
+            emit({
+                "type":      "progress",
+                "current":   idx + 1,
+                "total":     total,
+                "timestamp": pos,
+                "duration":  duration,
+            })
 
-            clip_start = max(0.0, midpoint - half)
-            clip_path = os.path.join(tmpdir, f"clip_{idx}.wav")
+            clip_start = max(0.0, pos - half)
+            clip_path  = os.path.join(tmpdir, f"win_{idx}.wav")
 
-            # Extract only the clip window — fast seek before -i, then limit duration.
             result = subprocess.run(
                 [args.ffmpeg, "-y",
                  "-ss", str(clip_start), "-t", str(args.clip_duration),
@@ -168,12 +210,22 @@ def run_chapters(args, model):
             except Exception:
                 continue
 
-            # Strip leading punctuation before checking for "chapter"
-            clean = text.lstrip(" \t\n\r.,\"\u2018\u2019\u201c\u201d-'")
-            if clean.lower().startswith("chapter"):
-                confirmed.append({"timestamp": midpoint, "text": text})
+            # Accept "chapter" anywhere in the transcription (case-insensitive).
+            # Strip leading punctuation that can precede the word in practice.
+            clean = text.lstrip(" \t\n\r.,\"'\u2018\u2019\u201c\u201d\u2014-")
+            if "chapter" in clean.lower():
+                confirmed.append({"timestamp": pos, "text": text})
 
-    emit({"type": "result", "confirmed": confirmed})
+    # Merge detections within 2 minutes of each other — keep earliest.
+    MERGE_GAP = 120  # seconds
+    merged = []
+    for det in confirmed:
+        if merged and (det["timestamp"] - merged[-1]["timestamp"]) < MERGE_GAP:
+            pass  # too close to previous detection — discard
+        else:
+            merged.append(det)
+
+    emit({"type": "result", "confirmed": merged, "duration": duration})
 
 
 def run_transcribe(args, model):
@@ -219,9 +271,10 @@ def main():
     parser.add_argument("--mode",          choices=["chapters", "transcribe"], default="chapters")
     # chapters mode
     parser.add_argument("--audio",         help="Source audio file (chapters mode)")
-    parser.add_argument("--silences-json", help="JSON array of silence midpoint timestamps")
+    parser.add_argument("--step-seconds",  type=float, default=480.0,
+                        help="Seconds between scan windows (chapters mode; default 480 = 8 min)")
     parser.add_argument("--clip-duration", type=float, default=20.0,
-                        help="Seconds to extract around each silence midpoint")
+                        help="Seconds to extract for each scan window")
     # transcribe mode
     parser.add_argument("--chapters-json", help="JSON array of {index, title, filepath} objects")
     # shared
@@ -235,9 +288,6 @@ def main():
             sys.exit(1)
         if not os.path.isfile(args.audio):
             emit({"type": "error", "code": "other", "message": f"Audio file not found: {args.audio}"})
-            sys.exit(1)
-        if not args.silences_json:
-            emit({"type": "error", "code": "other", "message": "--silences-json is required in chapters mode"})
             sys.exit(1)
     elif args.mode == "transcribe":
         if not args.chapters_json:
@@ -264,7 +314,7 @@ def main():
 
     # ── Dispatch ───────────────────────────────────────────────────────────────
     if args.mode == "chapters":
-        run_chapters(args, model)
+        run_scan(args, model)
     else:
         run_transcribe(args, model)
 

@@ -49,8 +49,10 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('split:progress', (_e, data) => cb(data));
   },
 
-  // AI chapter detection
-  detectChaptersAI: (bookId, silencePoints) => ipcRenderer.invoke('book:detectChaptersAI', { bookId, silencePoints }),
+  // AI chapter detection (sliding window scan)
+  detectChaptersAI: (bookId, stepSeconds)    => ipcRenderer.invoke('book:detectChaptersAI', { bookId, stepSeconds }),
+  // Known chapter count detection
+  detectByCount:    (bookId, chapterCount)   => ipcRenderer.invoke('book:detectByCount', { bookId, chapterCount }),
   onAIProgress: (cb) => {
     ipcRenderer.removeAllListeners('ai:progress');
     ipcRenderer.on('ai:progress', (_e, data) => cb(data));

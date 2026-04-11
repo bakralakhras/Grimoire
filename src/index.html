@@ -163,16 +163,16 @@
         <button class="tb" id="btn-prev" title="Previous chapter (P)">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="2"/></svg>
         </button>
-        <button class="tb tb-label" id="btn-skip-back" title="Skip back 30s (←)">
+        <button class="tb tb-label" id="btn-skip-back" title="Skip back 10s (←)">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 .49-3.61"/></svg>
-          <span>30</span>
+          <span>10</span>
         </button>
         <button class="tb play-btn" id="btn-play" title="Play / Pause (Space)">
           <svg id="icon-play" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           <svg id="icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" class="hidden"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
         </button>
-        <button class="tb tb-label" id="btn-skip-fwd" title="Skip forward 30s (→)">
-          <span>30</span>
+        <button class="tb tb-label" id="btn-skip-fwd" title="Skip forward 10s (→)">
+          <span>10</span>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-.49-3.61"/></svg>
         </button>
         <button class="tb" id="btn-next" title="Next chapter (N)">
@@ -301,12 +301,13 @@
           <span class="split-sens-label">Detection method</span>
           <div class="split-sens-btns">
             <button class="method-btn active" data-method="silence">Silence Only</button>
-            <button class="method-btn" data-method="ai">Smart Detection (AI)</button>
+            <button class="method-btn" data-method="ai">Smart Scan (AI)</button>
+            <button class="method-btn" data-method="count">Known Count</button>
           </div>
           <p class="split-sens-desc" id="split-method-desc">Fast — splits at silence gaps only</p>
         </div>
 
-        <div class="split-sens-wrap">
+        <div class="split-sens-wrap" id="split-sensitivity-wrap">
           <span class="split-sens-label">Silence sensitivity</span>
           <div class="split-sens-btns">
             <button class="sens-btn" data-val="low">Low</button>
@@ -314,6 +315,15 @@
             <button class="sens-btn" data-val="high">High</button>
           </div>
           <p class="split-sens-desc" id="split-sens-desc">Balanced — detects breaks ≥2.0 s at −30 dB</p>
+        </div>
+
+        <div class="split-sens-wrap hidden" id="split-count-wrap">
+          <span class="split-sens-label">Number of chapters</span>
+          <div class="split-count-row">
+            <input type="number" id="split-count-input" min="2" max="500" value="10" class="split-count-input">
+            <span class="split-count-unit">chapters</span>
+          </div>
+          <p class="split-sens-desc">Picks the N−1 longest silence gaps as chapter boundaries</p>
         </div>
 
         <div class="modal-footer">
@@ -329,11 +339,21 @@
         <p class="split-subtext">This may take a moment for long files.</p>
       </div>
 
-      <!-- AI verification state -->
+      <!-- AI scan state -->
       <div class="split-state hidden" id="split-ai-state">
         <p id="split-ai-msg" class="split-center-msg">Loading Whisper model…</p>
         <div class="split-prog-track"><div class="split-prog-fill" id="split-ai-prog-fill"></div></div>
         <p class="split-subtext" id="split-ai-sub"></p>
+      </div>
+
+      <!-- preview state -->
+      <div class="split-state hidden" id="split-preview-state">
+        <p class="split-center-msg">Found <strong id="split-preview-count">0</strong> chapters</p>
+        <div id="split-preview-list" class="split-preview-list"></div>
+        <div class="modal-footer">
+          <button class="btn-ghost" id="split-preview-back">← Back</button>
+          <button class="btn-primary" id="split-preview-go">Split Now</button>
+        </div>
       </div>
 
       <!-- error state (Python / faster-whisper not found) -->

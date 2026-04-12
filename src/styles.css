@@ -1197,8 +1197,14 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
 .settings-popup { right: 20px; min-width: 200px; }
 .settings-email {
   font-size: 12px; color: var(--text-dim);
-  padding: 2px 0 10px; margin: 0;
+  padding: 2px 0 6px; margin: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sync-error-msg {
+  font-size: 11px; color: #fca5a5;
+  padding: 4px 6px; margin-bottom: 6px;
+  background: rgba(239,68,68,0.1); border-radius: 5px;
+  word-break: break-word;
 }
 .settings-menu-item {
   display: block; width: 100%;

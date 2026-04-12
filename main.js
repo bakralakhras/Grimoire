@@ -101,9 +101,9 @@ function saveQueue() {
   try { fs.writeFileSync(queueFilePath(), JSON.stringify(offlineQueue), 'utf8'); } catch {}
 }
 
-function setSyncStatus(status) {
+function setSyncStatus(status, detail = '') {
   syncStatus = status;
-  mainWindow?.webContents.send('sync:status', status);
+  mainWindow?.webContents.send('sync:status', { status, detail });
 }
 
 async function doSync(op) {
@@ -133,10 +133,11 @@ async function doSync(op) {
       }, { onConflict: 'user_id,book_id' });
       if (error) throw error;
     }
-    return true;
+    return { ok: true };
   } catch (e) {
-    console.error('Sync op failed:', op.type, e?.message);
-    return false;
+    const msg = e?.message || 'Unknown sync error';
+    console.error('Sync op failed:', op.type, msg);
+    return { ok: false, error: msg };
   }
 }
 
@@ -145,12 +146,14 @@ async function flushQueue() {
   const pending = [...offlineQueue];
   offlineQueue = [];
   const failed = [];
+  let lastError = '';
   for (const op of pending) {
-    if (!await doSync(op)) failed.push(op);
+    const res = await doSync(op);
+    if (!res.ok) { failed.push(op); lastError = res.error || ''; }
   }
   offlineQueue = failed;
   saveQueue();
-  setSyncStatus(failed.length === 0 ? 'synced' : 'offline');
+  setSyncStatus(failed.length === 0 ? 'synced' : 'offline', lastError);
 }
 
 // ── S3 helpers ────────────────────────────────────────────────────────────────
@@ -239,10 +242,44 @@ function naturalSort(a, b) {
   return a.localeCompare(b);
 }
 
+// Author/series noise words that should NOT be stripped as part of the title
+const TITLE_STOPWORDS = new Set([
+  'The','A','An','Of','In','On','At','By','For','To','And','Or','Is','Its',
+]);
+
+function cleanTitle(raw) {
+  let t = raw;
+
+  // "Author - Title" → keep everything after the first " - "
+  const dashIdx = t.indexOf(' - ');
+  if (dashIdx > 0) t = t.slice(dashIdx + 3);
+
+  // Strip series/volume suffixes
+  t = t.replace(/\s*[,:]?\s*\bBook\s+(?:\d+|[IVXLCDM]+)\b.*/i, '');
+  t = t.replace(/\s*[,:]?\s*\bPart\s+(?:\d+|[IVXLCDM]+)\b.*/i, '');
+  t = t.replace(/\s*[,:]?\s*\bVol(?:ume)?\s*\.?\s*(?:\d+|[IVXLCDM]+)\b.*/i, '');
+  t = t.replace(/\s+#\d+\s*$/, '');
+  t = t.replace(/\s*\((?:Unabridged|Abridged|MP3|AAC|Audiobook)[^)]*\)/i, '');
+  t = t.replace(/\s*\[(?:Unabridged|Abridged|MP3|AAC|Audiobook)[^\]]*\]/i, '');
+
+  // Strip "Firstname Lastname" author prefix when followed by a capitalised title
+  // Both name parts must be ≥2-char Title Case words that are not stopwords
+  const m = t.match(/^([A-Z][a-z]{1,}\s+[A-Z][a-z]{1,})\s+(.+)$/);
+  if (m) {
+    const parts = m[1].split(/\s+/);
+    const rest  = m[2];
+    if (!TITLE_STOPWORDS.has(parts[0]) && !TITLE_STOPWORDS.has(parts[1]) && /^[A-Z]/.test(rest)) {
+      t = rest;
+    }
+  }
+
+  return t.trim();
+}
+
 function bookTitle(folderPath) {
-  return path.basename(folderPath)
-    .replace(/\[.*?\]/g, '').replace(/\(.*?\)/g, '')
-    .replace(/[_-]/g, ' ').replace(/\s+/g, ' ').trim();
+  const raw = path.basename(folderPath)
+    .replace(/[_]/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleanTitle(raw) || raw;
 }
 
 function chapterTitle(filename) {
@@ -307,7 +344,7 @@ function registerIPC() {
   });
 
   // Import folder
-  ipcMain.handle('library:import', (_e, folderPath) => {
+  ipcMain.handle('library:import', async (_e, folderPath) => {
     const audioExts = new Set(['.mp3', '.mp4', '.m4b', '.m4a', '.aac', '.ogg', '.wav', '.flac', '.opus']);
     let files;
     try {
@@ -330,13 +367,35 @@ function registerIPC() {
       duration: existing?.chapters?.[i]?.duration || 0,
     }));
 
+    // Try to extract cover art from ID3/MP4 tags if no cover is set yet
+    let coverPath = existing?.coverPath || null;
+    if (!coverPath) {
+      try {
+        const mm = require('music-metadata');
+        const firstFile = path.join(folderPath, files[0]);
+        const meta = await mm.parseFile(firstFile, { skipCovers: false, duration: false });
+        const pic = mm.selectCover(meta.common.picture);
+        if (pic?.data?.length) {
+          const coversDir = path.join(app.getPath('userData'), 'covers');
+          if (!fs.existsSync(coversDir)) fs.mkdirSync(coversDir, { recursive: true });
+          const ext = (pic.format || 'image/jpeg').replace('image/', '') || 'jpg';
+          const destPath = path.join(coversDir, `${bookId}_cover.${ext}`);
+          fs.writeFileSync(destPath, pic.data);
+          coverPath = destPath;
+        }
+      } catch (e) {
+        // Non-fatal — cover art extraction failure shouldn't block import
+        console.warn('Cover extraction skipped:', e.message);
+      }
+    }
+
     const book = {
       id: bookId,
       title: bookTitle(folderPath),
       folderPath,
       chapterCount: files.length,
       addedAt: existing ? existing.addedAt : new Date().toISOString(),
-      coverPath: existing?.coverPath || null,
+      coverPath,
       chapters,
     };
 
@@ -976,15 +1035,15 @@ function registerIPC() {
       offlineQueue = offlineQueue.filter(q => !(q.type === 'progress' && q.bookId === op.bookId));
     }
     setSyncStatus('syncing');
-    const ok = await doSync(op);
-    if (ok) {
+    const res = await doSync(op);
+    if (res.ok) {
       if (offlineQueue.length) flushQueue(); else setSyncStatus('synced');
     } else {
       offlineQueue.push(op);
       saveQueue();
-      setSyncStatus('offline');
+      setSyncStatus('offline', res.error);
     }
-    return { ok };
+    return res;
   });
 
   ipcMain.handle('sync:pull', async () => {
@@ -1033,7 +1092,7 @@ function registerIPC() {
     }
   });
 
-  ipcMain.handle('sync:getStatus', () => syncStatus);
+  ipcMain.handle('sync:getStatus', () => ({ status: syncStatus, detail: '' }));
 
   // ── S3 ────────────────────────────────────────────────────────────────────────
 

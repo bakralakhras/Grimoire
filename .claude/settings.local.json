@@ -12,7 +12,10 @@
       "Bash(node -e \"console.log\\(require\\('electron-builder/package.json'\\).version\\)\")",
       "Bash(npx electron-builder:*)",
       "Bash(CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --publish never)",
-      "Bash(node -e \"require\\('@aws-sdk/client-s3'\\);require\\('@aws-sdk/s3-request-presigner'\\);require\\('@aws-sdk/lib-storage'\\);console.log\\('all ok'\\)\")"
+      "Bash(node -e \"require\\('@aws-sdk/client-s3'\\);require\\('@aws-sdk/s3-request-presigner'\\);require\\('@aws-sdk/lib-storage'\\);console.log\\('all ok'\\)\")",
+      "Bash(node -e \"require\\('music-metadata'\\); console.log\\('ok'\\)\" --prefix \"C:\\\\Users\\\\BakerAlakhras\\\\Grimoire\")",
+      "Bash(node -e \"const mm = require\\('music-metadata'\\); console.log\\('ok', typeof mm.parseFile\\)\")",
+      "Bash(node -e \"const p = require\\('./node_modules/music-metadata/package.json'\\); console.log\\('version:', p.version\\)\")"
     ]
   }
 }

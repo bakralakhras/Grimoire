@@ -964,12 +964,20 @@ async function savePlayback() {
 
 // ── Sync helpers ──────────────────────────────────────────────────────────────
 
-function updateSyncDot(status) {
+function updateSyncDot(statusOrObj) {
+  const status = typeof statusOrObj === 'string' ? statusOrObj : (statusOrObj?.status || 'idle');
+  const detail = typeof statusOrObj === 'string' ? '' : (statusOrObj?.detail || '');
   const dot = $('sync-dot');
   if (!dot) return;
   dot.className = 'sync-dot sync-' + status;
   const labels = { synced: 'Synced', syncing: 'Syncing…', offline: 'Offline – changes queued', idle: '' };
-  dot.title = labels[status] || '';
+  dot.title = detail ? `${labels[status] || status}: ${detail}` : (labels[status] || '');
+  // Show sync error in settings popup if it's open
+  const errEl = $('sync-error-msg');
+  if (errEl) {
+    errEl.textContent = (status === 'offline' && detail) ? `Sync error: ${detail}` : '';
+    errEl.classList.toggle('hidden', !(status === 'offline' && detail));
+  }
 }
 
 function schedulePushProgress() {
@@ -1434,7 +1442,7 @@ function setupUI() {
       hideContextMenu();
     }
     const sp = $('settings-popup');
-    if (!sp.classList.contains('hidden') && !sp.contains(e.target) && e.target !== $('btn-settings')) {
+    if (!sp.classList.contains('hidden') && !sp.contains(e.target) && !e.target.closest('#btn-settings')) {
       hide(sp);
     }
   });

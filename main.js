@@ -999,9 +999,8 @@ function registerIPC() {
       ]);
       if (pRes.error) throw pRes.error;
 
-      // Merge progress: remote wins
+      // Merge progress: remote wins (applies to both local and cloud-only books)
       for (const r of pRes.data || []) {
-        if (!db.books[r.book_id]) continue;
         db.playback[r.book_id] = {
           chapterIndex: r.chapter_index, position: r.position,
           speed: r.speed, updatedAt: r.updated_at,
@@ -1111,10 +1110,35 @@ function registerIPC() {
       }
     }
 
+    // Upload cover art if present
+    let coverKey = null;
+    if (book.coverPath && fs.existsSync(book.coverPath)) {
+      try {
+        const ext = path.extname(book.coverPath).slice(1).toLowerCase() || 'jpg';
+        coverKey = `${prefix}/cover.${ext}`;
+        event.sender.send('s3:uploadProgress', {
+          bookId, chapterIndex: chapterTotal, chapterTotal, chapterTitle: 'Cover art',
+          filePct: 0, overallPct: 99, status: 'uploading',
+        });
+        await s3.send(new PutObjectCommand({
+          Bucket: cfg.bucket, Key: coverKey,
+          Body: fs.readFileSync(book.coverPath),
+          ContentType: ext === 'png' ? 'image/png' : 'image/jpeg',
+        }));
+        event.sender.send('s3:uploadProgress', {
+          bookId, chapterIndex: chapterTotal, chapterTotal, chapterTitle: 'Cover art',
+          filePct: 100, overallPct: 99, status: 'done',
+        });
+      } catch (e) {
+        console.error('Cover upload failed (non-fatal):', e.message);
+        coverKey = null;
+      }
+    }
+
     // Upload book meta.json for cross-device discovery
     const meta = {
       id: bookId, title: book.title, chapterCount: book.chapterCount,
-      addedAt: book.addedAt,
+      addedAt: book.addedAt, coverKey,
       chapters: chapters.map((ch, i) => ({
         id: ch.id, filename: ch.filename, title: ch.title, duration: ch.duration,
         s3Key: cloudPaths[String(i)],
@@ -1128,6 +1152,7 @@ function registerIPC() {
 
     db.books[bookId].cloudPaths = cloudPaths;
     db.books[bookId].cloudStatus = 'cloud';
+    if (coverKey) db.books[bookId].cloudCoverKey = coverKey;
     saveDb();
     return { success: true, cloudPaths };
   });
@@ -1158,6 +1183,7 @@ function registerIPC() {
     if (!currentUser) return { error: 'Not logged in' };
     try {
       const { ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
+      const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
       const s3 = createS3Client(cfg);
       const prefix = `${currentUser.id}/`;
       const list = await s3.send(new ListObjectsV2Command({ Bucket: cfg.bucket, Prefix: prefix, Delimiter: '/' }));
@@ -1166,6 +1192,16 @@ function registerIPC() {
         try {
           const res = await s3.send(new GetObjectCommand({ Bucket: cfg.bucket, Key: `${cp.Prefix}meta.json` }));
           const meta = JSON.parse(await res.Body.transformToString());
+          // Generate a presigned cover URL if this book has cover art in S3
+          if (meta.coverKey) {
+            try {
+              meta.coverUrl = await getSignedUrl(
+                s3,
+                new GetObjectCommand({ Bucket: cfg.bucket, Key: meta.coverKey }),
+                { expiresIn: 3600 }
+              );
+            } catch { meta.coverUrl = null; }
+          }
           books.push(meta);
         } catch { /* skip missing/corrupt meta */ }
       }

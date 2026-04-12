@@ -306,7 +306,7 @@ body {
 .btn-ghost:hover { border-color: var(--border-active); color: var(--text); }
 
 /* ── Book grid ──────────────────────────────────────────────────────────────── */
-#book-grid {
+#book-grid, .book-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 16px;
@@ -1274,31 +1274,8 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
 .cloud-cover-icon svg { width: 40px; height: 40px; }
 
 /* ── Cloud view ──────────────────────────────────────────────────────────────── */
-#cloud-view {
-  padding: 28px 28px 100px;
-  overflow-y: auto; height: 100%;
-}
-.cloud-view-header {
-  display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 20px;
-}
-.cloud-view-title { font-size: 20px; font-weight: 600; }
-.cloud-view-actions { display: flex; gap: 8px; }
-#cloud-loading {
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  gap: 14px; padding: 60px 0; color: var(--text-muted); font-size: 13px;
-}
 .cloud-spin { animation: cloud-spin-anim 1.1s linear infinite; }
 @keyframes cloud-spin-anim { to { transform: rotate(360deg); } }
-#cloud-empty {
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  gap: 12px; padding: 80px 20px; text-align: center;
-}
-.cloud-empty-icon { opacity: 0.2; }
-.cloud-empty-title { font-size: 16px; font-weight: 600; }
-.cloud-empty-sub { font-size: 13px; color: var(--text-muted); max-width: 280px; }
 
 /* ── Upload modal ────────────────────────────────────────────────────────────── */
 .upload-modal-inner { width: 460px; }

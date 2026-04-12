@@ -24,6 +24,7 @@ const S = {
   sleepTimerEnd: null,
   sleepInterval: null,
   saveInterval: null,
+  syncInterval: null,
 };
 
 // ── Auth / sync state ─────────────────────────────────────────────────────────
@@ -1041,20 +1042,36 @@ function setupAudio() {
   audio.addEventListener('play', () => {
     S.isPlaying = true;
     updatePlayButton(true);
-    // Start periodic save
+    // Save locally every 3s
     clearInterval(S.saveInterval);
-    S.saveInterval = setInterval(savePlayback, 5000);
+    S.saveInterval = setInterval(savePlayback, 3000);
+    // Push progress to Supabase every 3s (separate from local save so
+    // the debounce in schedulePushProgress never blocks the playing case)
+    clearInterval(S.syncInterval);
+    S.syncInterval = setInterval(() => {
+      if (!authUser || !S.currentBook) return;
+      api.sync.push({
+        type: 'progress',
+        bookId: S.currentBook.id,
+        bookTitle: S.currentBook.title,
+        chapterIndex: S.chapterIndex,
+        position: audio.currentTime,
+        speed: S.speed,
+      });
+    }, 3000);
   });
 
   audio.addEventListener('pause', () => {
     S.isPlaying = false;
     updatePlayButton(false);
     clearInterval(S.saveInterval);
+    clearInterval(S.syncInterval);
     savePlayback();
   });
 
   audio.addEventListener('ended', () => {
     clearInterval(S.saveInterval);
+    clearInterval(S.syncInterval);
     const next = S.chapterIndex + 1;
     if (S.currentBook && next < S.currentBook.chapters.length) {
       playChapter(next, 0);
@@ -1800,12 +1817,16 @@ function setupSplitModal() {
 function cloudBookCardHTML(book) {
   const col = bookColor(book.title);
   const isLocal = !!S.books.find(b => b.id === book.id);
+  const coverStyle = book.coverUrl
+    ? `background: url('${book.coverUrl}') center/cover no-repeat`
+    : `background:${col.bg}; color:${col.text}`;
+  const coverInner = book.coverUrl
+    ? ''
+    : `<div class="cloud-cover-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>`;
   return `
   <div class="book-card cloud-only-card" data-id="${book.id}">
-    <div class="cloud-badge" title="Cloud book"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>
-    <div class="book-cover" style="background:${col.bg}; color:${col.text}">
-      <div class="cloud-cover-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>
-    </div>
+    <div class="cloud-badge" title="${isLocal ? 'Local + Cloud' : 'Cloud only'}"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>
+    <div class="book-cover" style="${coverStyle}">${coverInner}</div>
     <div class="book-card-info">
       <p class="book-card-title">${book.title}</p>
       <p class="book-card-meta">${book.chapterCount} chapter${book.chapterCount !== 1 ? 's' : ''} · ${isLocal ? 'Local + Cloud' : 'Cloud only'}</p>
@@ -1867,12 +1888,15 @@ async function openCloudBook(cloudBook) {
   const book = {
     ...cloudBook,
     isCloudOnly: true,
-    folderPath: null, coverPath: null, bgPath: null,
+    folderPath: null, coverPath: cloudBook.coverUrl || null, bgPath: null,
   };
 
+  // Restore saved position (pulled from Supabase on login)
+  const pb = await api.getPlayback(cloudBook.id);
+
   S.currentBook = book;
-  S.chapterIndex = 0;
-  S.speed = 1;
+  S.chapterIndex = pb?.chapterIndex || 0;
+  S.speed = pb?.speed || 1;
   S.bookmarks = [];
   $('nav-player').disabled = false;
   renderChapterList();
@@ -1880,7 +1904,7 @@ async function openCloudBook(cloudBook) {
   updatePlayerBarInfo();
   showView('player');
   updateNowPlayingDisplay();
-  playChapter(0, 0);
+  playChapter(S.chapterIndex, pb?.position || 0);
 }
 
 // ── Upload ─────────────────────────────────────────────────────────────────────
@@ -1909,7 +1933,7 @@ function startUpload(book) {
     $('upload-overall-fill').style.width = op + '%';
     $('upload-overall-pct').textContent = op + '%';
     if (data.status === 'uploading') $('upload-status-msg').textContent = `Uploading ${data.chapterTitle}…`;
-    else if (data.status === 'done' && data.chapterIndex === data.chapterTotal - 1) $('upload-status-msg').textContent = 'Finalising…';
+    else if (data.status === 'done' && data.chapterIndex >= data.chapterTotal - 1) $('upload-status-msg').textContent = 'Finalising…';
   });
 
   api.s3.uploadBook(book.id).then(res => {

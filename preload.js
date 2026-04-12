@@ -58,6 +58,27 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('ai:progress', (_e, data) => cb(data));
   },
 
+  // S3 cloud storage
+  s3: {
+    getConfig:       ()        => ipcRenderer.invoke('s3:getConfig'),
+    saveConfig:      (cfg)     => ipcRenderer.invoke('s3:saveConfig', cfg),
+    testConfig:      ()        => ipcRenderer.invoke('s3:testConfig'),
+    uploadBook:      (bookId)  => ipcRenderer.invoke('s3:uploadBook', bookId),
+    getPresignedUrl: (data)    => ipcRenderer.invoke('s3:getPresignedUrl', data),
+    listCloudBooks:  ()        => ipcRenderer.invoke('s3:listCloudBooks'),
+    removeFromCloud: (bookId)  => ipcRenderer.invoke('s3:removeFromCloud', bookId),
+    onUploadProgress: (cb) => {
+      ipcRenderer.removeAllListeners('s3:uploadProgress');
+      ipcRenderer.on('s3:uploadProgress', (_e, data) => cb(data));
+    },
+  },
+
+  // Cloud book cache (books accessible from other devices)
+  cloudBooks: {
+    getAll: ()     => ipcRenderer.invoke('cloudBooks:getAll'),
+    save:   (book) => ipcRenderer.invoke('cloudBooks:save', book),
+  },
+
   // Auth
   auth: {
     getSession: ()       => ipcRenderer.invoke('auth:getSession'),

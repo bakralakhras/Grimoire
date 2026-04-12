@@ -39,6 +39,10 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           Now Playing
         </button>
+        <button class="nav-btn" data-view="cloud" id="nav-cloud">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+          Cloud
+        </button>
       </nav>
 
       <div id="chapter-sidebar" class="sidebar-section hidden">
@@ -90,6 +94,35 @@
         </div>
       </div>
 
+      <!-- Cloud View -->
+      <div id="cloud-view" class="view hidden">
+        <div class="view-header">
+          <h1 class="view-title serif">Cloud Library</h1>
+          <div class="view-header-actions">
+            <button class="icon-btn" id="cloud-refresh-btn" title="Refresh cloud library">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            </button>
+            <button class="icon-btn" id="cloud-settings-btn" title="Cloud storage settings">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="cloud-book-grid" class="book-grid"></div>
+        <div id="cloud-loading" class="empty-state hidden">
+          <div class="empty-icon cloud-spin">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+          </div>
+          <p>Loading cloud library…</p>
+        </div>
+        <div id="cloud-empty" class="empty-state hidden">
+          <div class="empty-icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+          </div>
+          <h2 class="serif" id="cloud-empty-title">No books in the cloud</h2>
+          <p id="cloud-empty-msg">Upload books from your library to stream them on any device.</p>
+        </div>
+      </div>
+
       <!-- Player View -->
       <div id="player-view" class="view hidden">
         <div id="player-bg"></div>
@@ -101,6 +134,7 @@
             </div>
           </div>
           <div id="now-playing-meta">
+            <div id="player-msg" class="player-msg hidden"></div>
             <h1 id="now-title" class="serif"></h1>
             <h2 id="now-chapter"></h2>
             <div id="now-stars">
@@ -222,6 +256,8 @@
   <div id="settings-popup" class="popup settings-popup hidden">
     <div class="popup-header">Account</div>
     <p id="settings-email" class="settings-email"></p>
+    <button id="btn-s3-settings" class="settings-menu-item btn-ghost">Cloud Storage…</button>
+    <div class="ctx-divider" style="margin:6px 0"></div>
     <button id="btn-logout" class="settings-menu-item btn-ghost">Sign Out</button>
   </div>
 
@@ -294,9 +330,53 @@
     <button class="ctx-item hidden" id="ctx-split">✂ Split into Chapters…</button>
     <button class="ctx-item" id="ctx-transcribe">◎ Transcribe…</button>
     <button class="ctx-item hidden" id="ctx-view-transcript">≡ View Transcript</button>
+    <button class="ctx-item hidden" id="ctx-upload-cloud">☁ Upload to cloud…</button>
+    <button class="ctx-item hidden" id="ctx-remove-cloud">✕ Remove from cloud</button>
     <button class="ctx-item" id="ctx-reimport">↺ Re-import</button>
     <div class="ctx-divider"></div>
     <button class="ctx-item danger" id="ctx-delete">✕ Remove from library</button>
+  </div>
+
+  <!-- ── Upload Modal ── -->
+  <div id="upload-modal" class="modal-backdrop hidden">
+    <div class="modal glass upload-modal-inner">
+      <h3>Uploading to Cloud</h3>
+      <p id="upload-book-name" class="upload-book-name"></p>
+      <div id="upload-file-list" class="upload-file-list"></div>
+      <div class="upload-overall-row">
+        <div class="upload-progress-bar"><div id="upload-overall-fill" class="upload-progress-fill"></div></div>
+        <span id="upload-overall-pct" class="upload-pct">0%</span>
+      </div>
+      <p id="upload-status-msg" class="upload-status-msg">Preparing…</p>
+      <div class="modal-footer">
+        <button class="btn-primary hidden" id="upload-done-btn">Done</button>
+        <button class="btn-ghost" id="upload-error-close" style="display:none">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── S3 Settings Modal ── -->
+  <div id="s3-modal" class="modal-backdrop hidden">
+    <div class="modal glass">
+      <h3>Cloud Storage Settings</h3>
+      <p class="s3-modal-desc">Enter your AWS S3 credentials. These are stored locally on this device only.</p>
+      <div class="s3-form">
+        <label class="s3-label">AWS Region</label>
+        <input type="text" id="s3-region" class="auth-input" placeholder="us-east-1" autocomplete="off">
+        <label class="s3-label">Bucket Name</label>
+        <input type="text" id="s3-bucket" class="auth-input" placeholder="my-audiobooks" autocomplete="off">
+        <label class="s3-label">Access Key ID</label>
+        <input type="text" id="s3-access-key" class="auth-input" placeholder="AKIA…" autocomplete="off" spellcheck="false">
+        <label class="s3-label">Secret Access Key</label>
+        <input type="password" id="s3-secret-key" class="auth-input" placeholder="Leave blank to keep current">
+      </div>
+      <div id="s3-test-result" class="s3-test-result hidden"></div>
+      <div class="modal-footer">
+        <button class="btn-ghost" id="s3-test-btn">Test connection</button>
+        <button class="btn-ghost" id="s3-modal-cancel">Cancel</button>
+        <button class="btn-primary" id="s3-modal-save">Save</button>
+      </div>
+    </div>
   </div>
 
   <!-- ── Split Chapters Modal ── -->

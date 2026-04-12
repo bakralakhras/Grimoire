@@ -11,7 +11,8 @@
       "Bash(du -sh node_modules/@ffmpeg-installer/ node_modules/@xenova/)",
       "Bash(node -e \"console.log\\(require\\('electron-builder/package.json'\\).version\\)\")",
       "Bash(npx electron-builder:*)",
-      "Bash(CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --publish never)"
+      "Bash(CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --publish never)",
+      "Bash(node -e \"require\\('@aws-sdk/client-s3'\\);require\\('@aws-sdk/s3-request-presigner'\\);require\\('@aws-sdk/lib-storage'\\);console.log\\('all ok'\\)\")"
     ]
   }
 }

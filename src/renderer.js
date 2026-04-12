@@ -436,9 +436,11 @@ function showView(name) {
   toggle($('player-view'), name === 'player');
   toggle($('chapter-sidebar'), name === 'player');
   toggle($('bookmarks-sidebar'), name === 'player');
+  toggle($('cloud-view'), name === 'cloud');
 
   $('nav-library').classList.toggle('active', name === 'library');
   $('nav-player').classList.toggle('active', name === 'player');
+  if ($('nav-cloud')) $('nav-cloud').classList.toggle('active', name === 'cloud');
 
   if (name === 'library') {
     renderLibrary();
@@ -502,6 +504,8 @@ function bookCardHTML(book) {
   const pct = Math.round(bookProgress(book) * 100);
   const isNow = S.currentBook?.id === book.id;
   const coverUrl = book.coverPath ? pathToUrl(book.coverPath) : null;
+  const isCloud = book.isCloudOnly;
+  const hasCloud = !!book.cloudPaths || isCloud;
 
   const coverStyle = coverUrl
     ? `background: url('${coverUrl}') center/cover no-repeat`
@@ -509,19 +513,20 @@ function bookCardHTML(book) {
   const coverInner = coverUrl ? '' : initials(book.title);
 
   return `
-  <div class="book-card${isNow ? ' now-playing' : ''}" data-id="${book.id}">
+  <div class="book-card${isNow ? ' now-playing' : ''}${isCloud ? ' cloud-only-card' : ''}" data-id="${book.id}">
     ${isNow ? '<span class="now-playing-badge">Now Playing</span>' : ''}
+    ${hasCloud ? `<div class="cloud-badge" title="${isCloud ? 'Cloud only' : 'Uploaded to cloud'}"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>` : ''}
     <div class="book-cover" style="${coverStyle}">
-      ${coverInner}
+      ${isCloud ? `<div class="cloud-cover-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>` : coverInner}
       ${isNow ? `<div class="book-cover-eq"><div class="eq-bars${S.isPlaying ? '' : ' paused'}" style="transform:scale(0.8)"><span></span><span></span><span></span><span></span></div></div>` : ''}
     </div>
     <div class="book-card-info">
       <p class="book-card-title">${book.title}</p>
-      <p class="book-card-meta">${book.chapterCount} chapter${book.chapterCount !== 1 ? 's' : ''}</p>
+      <p class="book-card-meta">${book.chapterCount} chapter${book.chapterCount !== 1 ? 's' : ''}${isCloud ? ' · Cloud' : ''}</p>
       ${book.rating ? `<div class="book-stars-static">${starsStaticHTML(book.rating)}</div>` : ''}
-      <div class="book-stars-input">${starsInputHTML()}</div>
-      <div class="progress-bar"><div class="progress-fill-bar" style="width:${pct}%"></div></div>
-      ${pct > 0 ? `<p class="progress-pct">${pct}%</p>` : ''}
+      ${!isCloud ? `<div class="book-stars-input">${starsInputHTML()}</div>` : ''}
+      ${!isCloud ? `<div class="progress-bar"><div class="progress-fill-bar" style="width:${pct}%"></div></div>` : ''}
+      ${!isCloud && pct > 0 ? `<p class="progress-pct">${pct}%</p>` : ''}
     </div>
   </div>`;
 }
@@ -557,7 +562,7 @@ async function openBook(bookId) {
 }
 
 // ── Player ───────────────────────────────────────────────────────────────────
-function playChapter(index, startPos = 0) {
+async function playChapter(index, startPos = 0) {
   const book = S.currentBook;
   if (!book) return;
 
@@ -565,9 +570,30 @@ function playChapter(index, startPos = 0) {
   if (!chapter) return;
 
   S.chapterIndex = index;
-  audio.src = pathToUrl(chapter.filepath);
   audio.playbackRate = S.speed;
   audio.volume = S.volume;
+
+  // Resolve audio source: prefer local file, fall back to S3 presigned URL
+  let src;
+  if (chapter.filepath && !book.isCloudOnly) {
+    src = pathToUrl(chapter.filepath);
+  } else {
+    // Cloud-only book or no local file — fetch presigned URL
+    if (!navigator.onLine) {
+      showPlayerMessage('No internet connection. Cannot stream cloud audio.', true);
+      return;
+    }
+    showPlayerMessage('Loading from cloud…', false);
+    const res = await api.s3.getPresignedUrl({ bookId: book.id, chapterIndex: index });
+    if (res.error) {
+      showPlayerMessage('Cloud playback failed: ' + res.error, true);
+      return;
+    }
+    src = res.url;
+    clearPlayerMessage();
+  }
+
+  audio.src = src;
 
   audio.addEventListener('loadedmetadata', () => {
     if (startPos > 0 && startPos < audio.duration - 1) {
@@ -575,11 +601,10 @@ function playChapter(index, startPos = 0) {
     }
     audio.play().catch(err => console.error('Play error:', err));
 
-    // Persist chapter duration for progress accuracy
-    if (!chapter.duration || Math.abs(chapter.duration - audio.duration) > 0.5) {
+    // Persist chapter duration for progress accuracy (local books only)
+    if (!book.isCloudOnly && (!chapter.duration || Math.abs(chapter.duration - audio.duration) > 0.5)) {
       chapter.duration = audio.duration;
       api.updateChapterDuration({ bookId: book.id, chapterId: index, duration: audio.duration });
-      // Also update in S.books list
       const lb = S.books.find(b => b.id === book.id);
       if (lb?.chapters?.[index]) lb.chapters[index].duration = audio.duration;
     }
@@ -588,6 +613,19 @@ function playChapter(index, startPos = 0) {
   updateNowPlayingDisplay();
   updateChapterListHighlight();
   updatePlayerBarInfo();
+}
+
+function showPlayerMessage(msg, isError) {
+  let el = $('player-msg');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'player-msg' + (isError ? ' player-msg-error' : '');
+  show(el);
+  if (!isError) setTimeout(clearPlayerMessage, 3000);
+}
+function clearPlayerMessage() {
+  const el = $('player-msg');
+  if (el) hide(el);
 }
 
 function togglePlay() {
@@ -965,6 +1003,12 @@ async function showContextMenu(e, bookId) {
   // Only show split option for single-file books
   const book = S.books.find(b => b.id === bookId);
   toggle($('ctx-split'), book?.chapterCount === 1);
+
+  // Cloud upload/remove options (only when logged in)
+  const hasCloud = !!book?.cloudPaths;
+  const canCloud = !!authUser;
+  toggle($('ctx-upload-cloud'), canCloud && !hasCloud);
+  toggle($('ctx-remove-cloud'), canCloud && hasCloud);
 
   show(menu);
 
@@ -1381,6 +1425,74 @@ function setupUI() {
   // Save on page unload
   window.addEventListener('beforeunload', () => savePlayback());
 
+  // ── Cloud nav ─────────────────────────────────────────────────────────────
+  $('nav-cloud').addEventListener('click', () => {
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    $('nav-cloud').classList.add('active');
+    showView('cloud');
+    renderCloudLibrary();
+  });
+
+  $('cloud-refresh-btn').addEventListener('click', renderCloudLibrary);
+
+  $('cloud-settings-btn').addEventListener('click', () => {
+    hide($('settings-popup'));
+    openS3SettingsModal();
+  });
+
+  // ── Cloud context menu items ───────────────────────────────────────────────
+  $('ctx-upload-cloud').addEventListener('click', async () => {
+    hideContextMenu();
+    const book = S.books.find(b => b.id === S.ctxBookId);
+    if (!book) return;
+    startUpload(book);
+  });
+
+  $('ctx-remove-cloud').addEventListener('click', async () => {
+    hideContextMenu();
+    const book = S.books.find(b => b.id === S.ctxBookId);
+    if (!book) return;
+    if (!confirm(`Remove "${book.title}" from cloud storage? Local files are kept.`)) return;
+    const res = await api.s3.removeFromCloud(book.id);
+    if (res.error) { alert('Remove failed: ' + res.error); return; }
+    delete book.cloudPaths; delete book.cloudStatus;
+    renderLibrary();
+  });
+
+  // ── Upload modal ──────────────────────────────────────────────────────────
+  $('upload-done-btn').addEventListener('click', () => {
+    hide($('upload-modal'));
+    renderLibrary();
+  });
+  $('upload-error-close').addEventListener('click', () => hide($('upload-modal')));
+
+  // ── S3 settings modal ──────────────────────────────────────────────────────
+  $('btn-s3-settings').addEventListener('click', () => {
+    hide($('settings-popup'));
+    openS3SettingsModal();
+  });
+
+  $('s3-modal-cancel').addEventListener('click', () => hide($('s3-modal')));
+  $('s3-modal').addEventListener('click', e => { if (e.target === $('s3-modal')) hide($('s3-modal')); });
+
+  $('s3-test-btn').addEventListener('click', async () => {
+    const res = $('s3-test-result');
+    res.textContent = 'Testing…'; res.className = 's3-test-result'; show(res);
+    // Save current form values first
+    await saveS3FormValues();
+    const result = await api.s3.testConfig();
+    if (result.success) {
+      res.textContent = '✓ Connected successfully'; res.className = 's3-test-result s3-test-ok';
+    } else {
+      res.textContent = '✗ ' + result.error; res.className = 's3-test-result s3-test-err';
+    }
+  });
+
+  $('s3-modal-save').addEventListener('click', async () => {
+    await saveS3FormValues();
+    hide($('s3-modal'));
+  });
+
   // ── Settings popup ────────────────────────────────────────────────────────
   $('btn-settings').addEventListener('click', () => {
     if (authUser) $('settings-email').textContent = authUser.email;
@@ -1680,6 +1792,161 @@ function setupSplitModal() {
     if (e.target === $('split-modal') && !$('split-cfg').classList.contains('hidden')) {
       closeSplitModal();
     }
+  });
+}
+
+// ── Cloud library ─────────────────────────────────────────────────────────────
+
+function cloudBookCardHTML(book) {
+  const col = bookColor(book.title);
+  const isLocal = !!S.books.find(b => b.id === book.id);
+  return `
+  <div class="book-card cloud-only-card" data-id="${book.id}">
+    <div class="cloud-badge" title="Cloud book"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>
+    <div class="book-cover" style="background:${col.bg}; color:${col.text}">
+      <div class="cloud-cover-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>
+    </div>
+    <div class="book-card-info">
+      <p class="book-card-title">${book.title}</p>
+      <p class="book-card-meta">${book.chapterCount} chapter${book.chapterCount !== 1 ? 's' : ''} · ${isLocal ? 'Local + Cloud' : 'Cloud only'}</p>
+    </div>
+  </div>`;
+}
+
+async function renderCloudLibrary() {
+  show($('cloud-loading')); hide($('cloud-empty')); $('cloud-book-grid').innerHTML = '';
+
+  if (!authUser) {
+    hide($('cloud-loading'));
+    $('cloud-empty-title').textContent = 'Sign in required';
+    $('cloud-empty-msg').textContent = 'Sign in to access your cloud library.';
+    show($('cloud-empty')); return;
+  }
+
+  const result = await api.s3.listCloudBooks();
+  hide($('cloud-loading'));
+
+  if (result.error) {
+    $('cloud-empty-title').textContent = 'Cannot connect';
+    $('cloud-empty-msg').textContent = result.error === 'S3 not configured'
+      ? 'Configure cloud storage settings to use this feature.'
+      : (navigator.onLine ? result.error : 'No internet connection. Cloud library is unavailable offline.');
+    show($('cloud-empty')); return;
+  }
+
+  const { books } = result;
+  if (books.length === 0) {
+    $('cloud-empty-title').textContent = 'No books in the cloud';
+    $('cloud-empty-msg').textContent = 'Upload books from your library to stream them on any device.';
+    show($('cloud-empty')); return;
+  }
+
+  // Cache for offline access
+  for (const book of books) await api.cloudBooks.save(book);
+
+  show($('cloud-book-grid'));
+  $('cloud-book-grid').innerHTML = books.map(cloudBookCardHTML).join('');
+  $('cloud-book-grid').querySelectorAll('.book-card').forEach(card => {
+    const id = card.dataset.id;
+    const cloudBook = books.find(b => b.id === id);
+    card.addEventListener('click', () => openCloudBook(cloudBook));
+  });
+}
+
+async function openCloudBook(cloudBook) {
+  // If local copy exists, open it normally
+  const local = S.books.find(b => b.id === cloudBook.id);
+  if (local) { openBook(cloudBook.id); return; }
+
+  if (!navigator.onLine) {
+    alert('No internet connection. This cloud book is not available offline.');
+    return;
+  }
+
+  // Build a playable cloud-only book object
+  const book = {
+    ...cloudBook,
+    isCloudOnly: true,
+    folderPath: null, coverPath: null, bgPath: null,
+  };
+
+  S.currentBook = book;
+  S.chapterIndex = 0;
+  S.speed = 1;
+  S.bookmarks = [];
+  $('nav-player').disabled = false;
+  renderChapterList();
+  renderBookmarks();
+  updatePlayerBarInfo();
+  showView('player');
+  updateNowPlayingDisplay();
+  playChapter(0, 0);
+}
+
+// ── Upload ─────────────────────────────────────────────────────────────────────
+
+function startUpload(book) {
+  $('upload-book-name').textContent = book.title;
+  $('upload-file-list').innerHTML = book.chapters
+    .map((ch, i) => `<div class="upload-file-row" id="ufile-${i}">
+      <span class="upload-file-name">${ch.title || ch.filename}</span>
+      <span class="upload-file-pct" id="ufile-pct-${i}">—</span>
+    </div>`).join('');
+  $('upload-overall-fill').style.width = '0%';
+  $('upload-overall-pct').textContent = '0%';
+  $('upload-status-msg').textContent = 'Starting upload…';
+  hide($('upload-done-btn'));
+  $('upload-error-close').style.display = 'none';
+  show($('upload-modal'));
+
+  api.s3.onUploadProgress(data => {
+    if (data.bookId !== book.id) return;
+    const row = $(`ufile-${data.chapterIndex}`);
+    const pctEl = $(`ufile-pct-${data.chapterIndex}`);
+    if (pctEl) pctEl.textContent = data.filePct + '%';
+    if (row) row.className = 'upload-file-row' + (data.status === 'done' ? ' done' : data.status === 'error' ? ' error' : ' active');
+    const op = data.overallPct || 0;
+    $('upload-overall-fill').style.width = op + '%';
+    $('upload-overall-pct').textContent = op + '%';
+    if (data.status === 'uploading') $('upload-status-msg').textContent = `Uploading ${data.chapterTitle}…`;
+    else if (data.status === 'done' && data.chapterIndex === data.chapterTotal - 1) $('upload-status-msg').textContent = 'Finalising…';
+  });
+
+  api.s3.uploadBook(book.id).then(res => {
+    if (res.error) {
+      $('upload-status-msg').textContent = 'Error: ' + res.error;
+      $('upload-error-close').style.display = '';
+    } else {
+      $('upload-status-msg').textContent = 'Upload complete!';
+      $('upload-overall-fill').style.width = '100%';
+      $('upload-overall-pct').textContent = '100%';
+      // Update in-memory book so cloud badge appears immediately
+      const lb = S.books.find(b => b.id === book.id);
+      if (lb) { lb.cloudPaths = res.cloudPaths; lb.cloudStatus = 'cloud'; }
+      show($('upload-done-btn'));
+    }
+  });
+}
+
+// ── S3 settings ────────────────────────────────────────────────────────────────
+
+async function openS3SettingsModal() {
+  const cfg = await api.s3.getConfig();
+  $('s3-region').value = cfg?.region || '';
+  $('s3-bucket').value = cfg?.bucket || '';
+  $('s3-access-key').value = cfg?.accessKeyId || '';
+  $('s3-secret-key').value = ''; // never show secret
+  $('s3-secret-key').placeholder = cfg?.hasSecret ? 'Leave blank to keep current' : 'Enter secret key';
+  hide($('s3-test-result'));
+  show($('s3-modal'));
+}
+
+async function saveS3FormValues() {
+  await api.s3.saveConfig({
+    region:          $('s3-region').value.trim()     || 'us-east-1',
+    bucket:          $('s3-bucket').value.trim(),
+    accessKeyId:     $('s3-access-key').value.trim(),
+    secretAccessKey: $('s3-secret-key').value || undefined,
   });
 }
 

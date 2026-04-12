@@ -27,9 +27,12 @@ function dbPath() {
 function loadDb() {
   try {
     const file = dbPath();
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return { books: {}, playback: {}, bookmarks: {}, cloudBooks: {}, ...data };
+    }
   } catch (e) { console.error('Load error:', e); }
-  return { books: {}, playback: {}, bookmarks: {} };
+  return { books: {}, playback: {}, bookmarks: {}, cloudBooks: {} };
 }
 
 function saveDb() {
@@ -148,6 +151,36 @@ async function flushQueue() {
   offlineQueue = failed;
   saveQueue();
   setSyncStatus(failed.length === 0 ? 'synced' : 'offline');
+}
+
+// ── S3 helpers ────────────────────────────────────────────────────────────────
+
+function s3ConfigPath() { return path.join(app.getPath('userData'), 's3-config.json'); }
+
+function loadS3Config() {
+  try {
+    if (fs.existsSync(s3ConfigPath()))
+      return JSON.parse(fs.readFileSync(s3ConfigPath(), 'utf8'));
+  } catch {}
+  // Default credentials (user can override in settings)
+  return {
+    region: 'us-east-1',
+    bucket: 'grimoire-library',
+    accessKeyId: 'AKIAW44VDXKCMRWZPVX5',
+    secretAccessKey: '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',
+  };
+}
+
+function saveS3Config(cfg) {
+  try { fs.writeFileSync(s3ConfigPath(), JSON.stringify(cfg, null, 2), 'utf8'); } catch {}
+}
+
+function createS3Client(cfg) {
+  const { S3Client } = require('@aws-sdk/client-s3');
+  return new S3Client({
+    region: cfg.region || 'us-east-1',
+    credentials: { accessKeyId: cfg.accessKeyId, secretAccessKey: cfg.secretAccessKey },
+  });
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1002,4 +1035,174 @@ function registerIPC() {
   });
 
   ipcMain.handle('sync:getStatus', () => syncStatus);
+
+  // ── S3 ────────────────────────────────────────────────────────────────────────
+
+  ipcMain.handle('s3:getConfig', () => {
+    const cfg = loadS3Config();
+    // Never send secret back to renderer — just signal if it's set
+    return { region: cfg.region, bucket: cfg.bucket, accessKeyId: cfg.accessKeyId, hasSecret: !!cfg.secretAccessKey };
+  });
+
+  ipcMain.handle('s3:saveConfig', (_e, cfg) => {
+    // cfg may omit secretAccessKey if user didn't re-enter it
+    const existing = loadS3Config();
+    const merged = { ...existing, ...cfg };
+    if (!cfg.secretAccessKey) merged.secretAccessKey = existing.secretAccessKey;
+    saveS3Config(merged);
+    return true;
+  });
+
+  ipcMain.handle('s3:testConfig', async () => {
+    const cfg = loadS3Config();
+    if (!cfg?.accessKeyId) return { error: 'No S3 config saved' };
+    try {
+      const { HeadBucketCommand } = require('@aws-sdk/client-s3');
+      await createS3Client(cfg).send(new HeadBucketCommand({ Bucket: cfg.bucket }));
+      return { success: true };
+    } catch (e) { return { error: e.message }; }
+  });
+
+  ipcMain.handle('s3:uploadBook', async (event, bookId) => {
+    const book = db.books[bookId];
+    if (!book) return { error: 'Book not found' };
+    const cfg = loadS3Config();
+    if (!cfg?.accessKeyId) return { error: 'S3 not configured' };
+    if (!currentUser) return { error: 'Not logged in' };
+
+    const { PutObjectCommand } = require('@aws-sdk/client-s3');
+    const { Upload } = require('@aws-sdk/lib-storage');
+    const s3 = createS3Client(cfg);
+    const prefix = `${currentUser.id}/${bookId}`;
+    const cloudPaths = {};
+    const chapters = book.chapters;
+    const chapterTotal = chapters.length;
+
+    for (let i = 0; i < chapterTotal; i++) {
+      const ch = chapters[i];
+      const key = `${prefix}/chapters/${ch.filename}`;
+
+      event.sender.send('s3:uploadProgress', {
+        bookId, chapterIndex: i, chapterTotal, chapterTitle: ch.title,
+        filePct: 0, overallPct: Math.round(i / chapterTotal * 100), status: 'uploading',
+      });
+
+      try {
+        const uploader = new Upload({
+          client: s3,
+          params: { Bucket: cfg.bucket, Key: key, Body: fs.createReadStream(ch.filepath) },
+        });
+        uploader.on('httpUploadProgress', ({ loaded, total: ft }) => {
+          const fp = ft ? Math.round(loaded / ft * 100) : 0;
+          event.sender.send('s3:uploadProgress', {
+            bookId, chapterIndex: i, chapterTotal, chapterTitle: ch.title,
+            filePct: fp, overallPct: Math.round((i + fp / 100) / chapterTotal * 100), status: 'uploading',
+          });
+        });
+        await uploader.done();
+        cloudPaths[String(i)] = key;
+        event.sender.send('s3:uploadProgress', {
+          bookId, chapterIndex: i, chapterTotal, chapterTitle: ch.title,
+          filePct: 100, overallPct: Math.round((i + 1) / chapterTotal * 100), status: 'done',
+        });
+      } catch (e) {
+        event.sender.send('s3:uploadProgress', { bookId, chapterIndex: i, chapterTotal, chapterTitle: ch.title, status: 'error', error: e.message });
+        return { error: `Chapter ${i + 1} failed: ${e.message}` };
+      }
+    }
+
+    // Upload book meta.json for cross-device discovery
+    const meta = {
+      id: bookId, title: book.title, chapterCount: book.chapterCount,
+      addedAt: book.addedAt,
+      chapters: chapters.map((ch, i) => ({
+        id: ch.id, filename: ch.filename, title: ch.title, duration: ch.duration,
+        s3Key: cloudPaths[String(i)],
+      })),
+      cloudPaths,
+    };
+    await s3.send(new PutObjectCommand({
+      Bucket: cfg.bucket, Key: `${prefix}/meta.json`,
+      Body: JSON.stringify(meta, null, 2), ContentType: 'application/json',
+    }));
+
+    db.books[bookId].cloudPaths = cloudPaths;
+    db.books[bookId].cloudStatus = 'cloud';
+    saveDb();
+    return { success: true, cloudPaths };
+  });
+
+  ipcMain.handle('s3:getPresignedUrl', async (_e, { bookId, chapterIndex }) => {
+    const s3Key =
+      db.books[bookId]?.cloudPaths?.[String(chapterIndex)] ||
+      db.cloudBooks?.[bookId]?.cloudPaths?.[String(chapterIndex)] ||
+      db.cloudBooks?.[bookId]?.chapters?.[chapterIndex]?.s3Key;
+    if (!s3Key) return { error: 'No S3 path for this chapter' };
+    const cfg = loadS3Config();
+    if (!cfg?.accessKeyId) return { error: 'S3 not configured' };
+    try {
+      const { GetObjectCommand } = require('@aws-sdk/client-s3');
+      const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+      const url = await getSignedUrl(
+        createS3Client(cfg),
+        new GetObjectCommand({ Bucket: cfg.bucket, Key: s3Key }),
+        { expiresIn: 3600 }
+      );
+      return { url };
+    } catch (e) { return { error: e.message }; }
+  });
+
+  ipcMain.handle('s3:listCloudBooks', async () => {
+    const cfg = loadS3Config();
+    if (!cfg?.accessKeyId) return { error: 'S3 not configured' };
+    if (!currentUser) return { error: 'Not logged in' };
+    try {
+      const { ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
+      const s3 = createS3Client(cfg);
+      const prefix = `${currentUser.id}/`;
+      const list = await s3.send(new ListObjectsV2Command({ Bucket: cfg.bucket, Prefix: prefix, Delimiter: '/' }));
+      const books = [];
+      for (const cp of list.CommonPrefixes || []) {
+        try {
+          const res = await s3.send(new GetObjectCommand({ Bucket: cfg.bucket, Key: `${cp.Prefix}meta.json` }));
+          const meta = JSON.parse(await res.Body.transformToString());
+          books.push(meta);
+        } catch { /* skip missing/corrupt meta */ }
+      }
+      return { books };
+    } catch (e) { return { error: e.message }; }
+  });
+
+  ipcMain.handle('s3:removeFromCloud', async (_e, bookId) => {
+    const cfg = loadS3Config();
+    if (!cfg?.accessKeyId) return { error: 'S3 not configured' };
+    if (!currentUser) return { error: 'Not logged in' };
+    try {
+      const { ListObjectsV2Command, DeleteObjectsCommand } = require('@aws-sdk/client-s3');
+      const s3 = createS3Client(cfg);
+      const prefix = `${currentUser.id}/${bookId}/`;
+      const list = await s3.send(new ListObjectsV2Command({ Bucket: cfg.bucket, Prefix: prefix }));
+      if (list.Contents?.length) {
+        await s3.send(new DeleteObjectsCommand({
+          Bucket: cfg.bucket,
+          Delete: { Objects: list.Contents.map(o => ({ Key: o.Key })) },
+        }));
+      }
+      if (db.books[bookId]) { delete db.books[bookId].cloudPaths; delete db.books[bookId].cloudStatus; }
+      if (db.cloudBooks?.[bookId]) delete db.cloudBooks[bookId];
+      saveDb();
+      return { success: true };
+    } catch (e) { return { error: e.message }; }
+  });
+
+  // ── Cloud book cache ──────────────────────────────────────────────────────────
+
+  ipcMain.handle('cloudBooks:getAll', () => Object.values(db.cloudBooks || {}));
+
+  ipcMain.handle('cloudBooks:save', (_e, book) => {
+    if (!db.cloudBooks) db.cloudBooks = {};
+    db.cloudBooks[book.id] = book;
+    saveDb();
+    return true;
+  });
 }

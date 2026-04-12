@@ -26,6 +26,10 @@ const S = {
   saveInterval: null,
 };
 
+// ── Auth / sync state ─────────────────────────────────────────────────────────
+let authUser = null;      // { id, email } when logged in
+let _progressPushTimer = null;
+
 // ── Audio ────────────────────────────────────────────────────────────────────
 const audio = new Audio();
 
@@ -116,6 +120,7 @@ async function rateBook(bookId, rating) {
     renderNowStars(rating);
   }
   renderLibrary();
+  api.sync.push({ type: 'rating', bookId, rating });
 }
 
 async function clearRating(bookId) {
@@ -127,6 +132,7 @@ async function clearRating(bookId) {
     renderNowStars(0);
   }
   renderLibrary();
+  api.sync.push({ type: 'rating', bookId, rating: null });
 }
 
 function renderNowStars(value) {
@@ -823,6 +829,7 @@ function renderBookmarks() {
       e.stopPropagation();
       const id = e.currentTarget.dataset.id;
       await api.deleteBookmark({ bookId: S.currentBook.id, bookmarkId: id });
+      api.sync.push({ type: 'bookmark_delete', bookmarkId: id });
       S.bookmarks = S.bookmarks.filter(b => b.id !== id);
       renderBookmarks();
     });
@@ -851,6 +858,7 @@ async function saveBookmark() {
   S.bookmarks.push(bm);
   S.bookmarks.sort((a, b) => a.chapterIndex - b.chapterIndex || a.position - b.position);
   renderBookmarks();
+  api.sync.push({ type: 'bookmark_upsert', ...bm });
 }
 
 // ── Sleep timer ───────────────────────────────────────────────────────────────
@@ -912,6 +920,33 @@ async function savePlayback() {
   if (lb) {
     lb.playback = { chapterIndex: S.chapterIndex, position: audio.currentTime, speed: S.speed };
   }
+  schedulePushProgress();
+}
+
+// ── Sync helpers ──────────────────────────────────────────────────────────────
+
+function updateSyncDot(status) {
+  const dot = $('sync-dot');
+  if (!dot) return;
+  dot.className = 'sync-dot sync-' + status;
+  const labels = { synced: 'Synced', syncing: 'Syncing…', offline: 'Offline – changes queued', idle: '' };
+  dot.title = labels[status] || '';
+}
+
+function schedulePushProgress() {
+  if (!authUser) return;
+  clearTimeout(_progressPushTimer);
+  _progressPushTimer = setTimeout(() => {
+    if (!S.currentBook) return;
+    api.sync.push({
+      type: 'progress',
+      bookId: S.currentBook.id,
+      bookTitle: S.currentBook.title,
+      chapterIndex: S.chapterIndex,
+      position: audio.currentTime || 0,
+      speed: S.speed,
+    });
+  }, 3000);
 }
 
 // ── Context menu ──────────────────────────────────────────────────────────────
@@ -1337,10 +1372,54 @@ function setupUI() {
     if (!$('ctx-menu').classList.contains('hidden') && !$('ctx-menu').contains(e.target)) {
       hideContextMenu();
     }
+    const sp = $('settings-popup');
+    if (!sp.classList.contains('hidden') && !sp.contains(e.target) && e.target !== $('btn-settings')) {
+      hide(sp);
+    }
   });
 
   // Save on page unload
   window.addEventListener('beforeunload', () => savePlayback());
+
+  // ── Settings popup ────────────────────────────────────────────────────────
+  $('btn-settings').addEventListener('click', () => {
+    if (authUser) $('settings-email').textContent = authUser.email;
+    $('settings-popup').classList.toggle('hidden');
+    hide($('sleep-popup'));
+  });
+
+  $('btn-logout').addEventListener('click', async () => {
+    hide($('settings-popup'));
+    await api.auth.logout();
+    authUser = null;
+    updateSyncDot('idle');
+    setAuthMode('login');
+    $('auth-email').value = '';
+    $('auth-password').value = '';
+    hide($('auth-error'));
+    show($('auth-overlay'));
+  });
+
+  // ── Auth overlay ──────────────────────────────────────────────────────────
+  $('auth-switch-btn').addEventListener('click', () => {
+    const mode = $('auth-overlay').dataset.mode === 'login' ? 'signup' : 'login';
+    setAuthMode(mode);
+    hide($('auth-error'));
+  });
+
+  $('auth-submit').addEventListener('click', handleAuthSubmit);
+
+  $('auth-email').addEventListener('keydown', e => {
+    if (e.key === 'Enter') $('auth-password').focus();
+  });
+  $('auth-password').addEventListener('keydown', e => {
+    if (e.key === 'Enter') handleAuthSubmit();
+  });
+
+  $('auth-skip').addEventListener('click', async () => {
+    await api.auth.skip();
+    hide($('auth-overlay'));
+  });
 }
 
 // ── Chapter splitting ─────────────────────────────────────────────────────────
@@ -1604,6 +1683,72 @@ function setupSplitModal() {
   });
 }
 
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+function setAuthMode(mode) {
+  $('auth-overlay').dataset.mode = mode;
+  const isLogin = mode === 'login';
+  $('auth-submit').textContent      = isLogin ? 'Sign In' : 'Create Account';
+  $('auth-switch-text').textContent = isLogin ? "Don't have an account?" : 'Already have one?';
+  $('auth-switch-btn').textContent  = isLogin ? 'Sign Up' : 'Sign In';
+}
+
+function showAuthError(msg) {
+  const el = $('auth-error');
+  el.textContent = msg;
+  show(el);
+}
+
+async function checkAuthAndPull() {
+  const session = await api.auth.getSession();
+  if (session?.user) {
+    authUser = session.user;
+    hide($('auth-overlay'));
+    api.sync.onStatus(updateSyncDot);
+    updateSyncDot('syncing');
+    const res = await api.sync.pull();
+    if (!res.error) await loadLibrary();
+  } else if (session?.skipped) {
+    hide($('auth-overlay'));
+  } else {
+    show($('auth-overlay'));
+    setAuthMode('login');
+  }
+}
+
+async function handleAuthSubmit() {
+  const email    = $('auth-email').value.trim();
+  const password = $('auth-password').value;
+  if (!email || !password) return;
+
+  const btn  = $('auth-submit');
+  const mode = $('auth-overlay').dataset.mode;
+  btn.disabled    = true;
+  btn.textContent = 'Please wait…';
+  hide($('auth-error'));
+
+  const result = mode === 'login'
+    ? await api.auth.login({ email, password })
+    : await api.auth.signup({ email, password });
+
+  if (result.error) {
+    showAuthError(result.error);
+    btn.disabled = false;
+    setAuthMode(mode);
+  } else if (result.needsConfirmation) {
+    showAuthError('Check your email to confirm your account, then sign in.');
+    btn.disabled = false;
+    setAuthMode('login');
+  } else {
+    authUser = result.user;
+    hide($('auth-overlay'));
+    api.sync.onStatus(updateSyncDot);
+    updateSyncDot('syncing');
+    const res = await api.sync.pull();
+    if (!res.error) await loadLibrary();
+  }
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
   setupAudio();
@@ -1613,6 +1758,7 @@ async function init() {
   setupSplitModal();
   updateVolSlider();
   await loadLibrary();
+  await checkAuthAndPull();
 }
 
 document.addEventListener('DOMContentLoaded', init);

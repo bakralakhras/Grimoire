@@ -57,4 +57,24 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.removeAllListeners('ai:progress');
     ipcRenderer.on('ai:progress', (_e, data) => cb(data));
   },
+
+  // Auth
+  auth: {
+    getSession: ()       => ipcRenderer.invoke('auth:getSession'),
+    login:      (data)   => ipcRenderer.invoke('auth:login', data),
+    signup:     (data)   => ipcRenderer.invoke('auth:signup', data),
+    logout:     ()       => ipcRenderer.invoke('auth:logout'),
+    skip:       ()       => ipcRenderer.invoke('auth:skip'),
+  },
+
+  // Sync
+  sync: {
+    push:      (op) => ipcRenderer.invoke('sync:push', op),
+    pull:      ()   => ipcRenderer.invoke('sync:pull'),
+    getStatus: ()   => ipcRenderer.invoke('sync:getStatus'),
+    onStatus:  (cb) => {
+      ipcRenderer.removeAllListeners('sync:status');
+      ipcRenderer.on('sync:status', (_e, status) => cb(status));
+    },
+  },
 });

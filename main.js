@@ -3,6 +3,16 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
+// ── Supabase ──────────────────────────────────────────────────────────────────
+
+const SUPABASE_URL  = 'https://bxsjzldjsonkrbduqbrq.supabase.co';
+const SUPABASE_ANON = 'sb_publishable_wCvj-EUvPlnfmdMO3WWglw_TJ1ox0oQ';
+
+let supabase     = null;
+let currentUser  = null;
+let syncStatus   = 'idle';
+let offlineQueue = [];
+
 
 let mainWindow;
 let transcribeWindow;
@@ -25,6 +35,119 @@ function loadDb() {
 function saveDb() {
   try { fs.writeFileSync(dbPath(), JSON.stringify(db, null, 2)); }
   catch (e) { console.error('Save error:', e); }
+}
+
+// ── Supabase helpers ──────────────────────────────────────────────────────────
+
+function initSupabase() {
+  try {
+    const { createClient } = require('@supabase/supabase-js');
+    supabase = createClient(SUPABASE_URL, SUPABASE_ANON, { auth: { persistSession: false } });
+  } catch (e) { console.error('Supabase init failed:', e); }
+}
+
+function sessionFilePath()   { return path.join(app.getPath('userData'), 'auth-session.json'); }
+function authStateFilePath() { return path.join(app.getPath('userData'), 'auth-state.json'); }
+function queueFilePath()     { return path.join(app.getPath('userData'), 'sync-queue.json'); }
+
+function saveSession(session) {
+  try {
+    fs.writeFileSync(sessionFilePath(), JSON.stringify({
+      access_token: session.access_token,
+      refresh_token: session.refresh_token,
+    }), 'utf8');
+  } catch {}
+}
+
+function clearSession() {
+  try { if (fs.existsSync(sessionFilePath())) fs.unlinkSync(sessionFilePath()); } catch {}
+}
+
+async function loadSession() {
+  if (!supabase) return null;
+  try {
+    if (!fs.existsSync(sessionFilePath())) return null;
+    const { access_token, refresh_token } = JSON.parse(fs.readFileSync(sessionFilePath(), 'utf8'));
+    const { data, error } = await supabase.auth.setSession({ access_token, refresh_token });
+    if (error || !data?.session) { clearSession(); return null; }
+    currentUser = data.session.user;
+    saveSession(data.session);
+    return data.session;
+  } catch { clearSession(); return null; }
+}
+
+function isAuthSkipped() {
+  try {
+    if (!fs.existsSync(authStateFilePath())) return false;
+    return JSON.parse(fs.readFileSync(authStateFilePath(), 'utf8'))?.skipped === true;
+  } catch { return false; }
+}
+
+function setAuthSkipped(val) {
+  try { fs.writeFileSync(authStateFilePath(), JSON.stringify({ skipped: val }), 'utf8'); } catch {}
+}
+
+function loadQueue() {
+  try {
+    if (fs.existsSync(queueFilePath()))
+      offlineQueue = JSON.parse(fs.readFileSync(queueFilePath(), 'utf8'));
+  } catch { offlineQueue = []; }
+}
+
+function saveQueue() {
+  try { fs.writeFileSync(queueFilePath(), JSON.stringify(offlineQueue), 'utf8'); } catch {}
+}
+
+function setSyncStatus(status) {
+  syncStatus = status;
+  mainWindow?.webContents.send('sync:status', status);
+}
+
+async function doSync(op) {
+  try {
+    if (op.type === 'progress') {
+      const { error } = await supabase.from('progress').upsert({
+        user_id: currentUser.id, book_id: op.bookId, book_title: op.bookTitle || '',
+        chapter_index: op.chapterIndex, position: op.position, speed: op.speed,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,book_id' });
+      if (error) throw error;
+    } else if (op.type === 'bookmark_upsert') {
+      const { error } = await supabase.from('bookmarks').upsert({
+        id: op.id, user_id: currentUser.id, book_id: op.bookId,
+        chapter_index: op.chapterIndex, position: op.position,
+        name: op.name, created_at: op.createdAt,
+      });
+      if (error) throw error;
+    } else if (op.type === 'bookmark_delete') {
+      const { error } = await supabase.from('bookmarks')
+        .delete().eq('id', op.bookmarkId).eq('user_id', currentUser.id);
+      if (error) throw error;
+    } else if (op.type === 'rating') {
+      const { error } = await supabase.from('book_settings').upsert({
+        user_id: currentUser.id, book_id: op.bookId,
+        rating: op.rating ?? null, updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,book_id' });
+      if (error) throw error;
+    }
+    return true;
+  } catch (e) {
+    console.error('Sync op failed:', op.type, e?.message);
+    return false;
+  }
+}
+
+async function flushQueue() {
+  if (!offlineQueue.length || !currentUser || !supabase) return;
+  const pending = [...offlineQueue];
+  offlineQueue = [];
+  const failed = [];
+  for (const op of pending) {
+    if (!await doSync(op)) failed.push(op);
+  }
+  offlineQueue = failed;
+  saveQueue();
+  setSyncStatus(failed.length === 0 ? 'synced' : 'offline');
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -99,10 +222,14 @@ function chapterTitle(filename) {
 
 // ── App setup ────────────────────────────────────────────────────────────────
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   db = loadDb();
+  initSupabase();
+  loadQueue();
+  await loadSession();
   createWindow();
   registerIPC();
+  setInterval(flushQueue, 30_000);
 });
 
 app.on('window-all-closed', () => {
@@ -759,4 +886,120 @@ function registerIPC() {
     }
     return true;
   });
+
+  // ── Auth ─────────────────────────────────────────────────────────────────────
+
+  ipcMain.handle('auth:getSession', () => {
+    if (currentUser) return { user: { id: currentUser.id, email: currentUser.email } };
+    if (isAuthSkipped()) return { skipped: true };
+    return null;
+  });
+
+  ipcMain.handle('auth:login', async (_e, { email, password }) => {
+    if (!supabase) return { error: 'Sync unavailable' };
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) return { error: error.message };
+      currentUser = data.user;
+      saveSession(data.session);
+      setAuthSkipped(false);
+      return { user: { id: data.user.id, email: data.user.email } };
+    } catch (e) { return { error: e.message }; }
+  });
+
+  ipcMain.handle('auth:signup', async (_e, { email, password }) => {
+    if (!supabase) return { error: 'Sync unavailable' };
+    try {
+      const { data, error } = await supabase.auth.signUp({ email, password });
+      if (error) return { error: error.message };
+      if (data.session) {
+        currentUser = data.user;
+        saveSession(data.session);
+        setAuthSkipped(false);
+        return { user: { id: data.user.id, email: data.user.email } };
+      }
+      return { needsConfirmation: true };
+    } catch (e) { return { error: e.message }; }
+  });
+
+  ipcMain.handle('auth:logout', async () => {
+    try { if (supabase) await supabase.auth.signOut(); } catch {}
+    currentUser = null;
+    clearSession();
+    offlineQueue = [];
+    saveQueue();
+    setSyncStatus('idle');
+    return true;
+  });
+
+  ipcMain.handle('auth:skip', () => { setAuthSkipped(true); return true; });
+
+  // ── Sync ─────────────────────────────────────────────────────────────────────
+
+  ipcMain.handle('sync:push', async (_e, op) => {
+    if (!currentUser) return { skipped: true };
+    // Dedupe progress pushes — keep only latest per book
+    if (op.type === 'progress') {
+      offlineQueue = offlineQueue.filter(q => !(q.type === 'progress' && q.bookId === op.bookId));
+    }
+    setSyncStatus('syncing');
+    const ok = await doSync(op);
+    if (ok) {
+      if (offlineQueue.length) flushQueue(); else setSyncStatus('synced');
+    } else {
+      offlineQueue.push(op);
+      saveQueue();
+      setSyncStatus('offline');
+    }
+    return { ok };
+  });
+
+  ipcMain.handle('sync:pull', async () => {
+    if (!supabase || !currentUser) return { error: 'Not logged in' };
+    setSyncStatus('syncing');
+    try {
+      const uid = currentUser.id;
+      const [pRes, bRes, sRes] = await Promise.all([
+        supabase.from('progress').select('*').eq('user_id', uid),
+        supabase.from('bookmarks').select('*').eq('user_id', uid),
+        supabase.from('book_settings').select('*').eq('user_id', uid),
+      ]);
+      if (pRes.error) throw pRes.error;
+
+      // Merge progress: remote wins
+      for (const r of pRes.data || []) {
+        if (!db.books[r.book_id]) continue;
+        db.playback[r.book_id] = {
+          chapterIndex: r.chapter_index, position: r.position,
+          speed: r.speed, updatedAt: r.updated_at,
+        };
+      }
+      // Merge bookmarks: add remote entries missing locally
+      for (const r of bRes.data || []) {
+        if (!db.books[r.book_id]) continue;
+        if (!db.bookmarks[r.book_id]) db.bookmarks[r.book_id] = [];
+        if (!db.bookmarks[r.book_id].some(b => b.id === r.id)) {
+          db.bookmarks[r.book_id].push({
+            id: r.id, bookId: r.book_id, chapterIndex: r.chapter_index,
+            position: r.position, name: r.name, createdAt: r.created_at,
+          });
+        }
+      }
+      // Merge ratings
+      for (const r of sRes.data || []) {
+        if (!db.books[r.book_id]) continue;
+        if (r.rating != null) db.books[r.book_id].rating = r.rating;
+        else delete db.books[r.book_id].rating;
+      }
+
+      saveDb();
+      setSyncStatus('synced');
+      return { success: true };
+    } catch (e) {
+      setSyncStatus('offline');
+      return { error: e.message };
+    }
+  });
+
+  ipcMain.handle('sync:getStatus', () => syncStatus);
 }

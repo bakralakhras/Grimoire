@@ -4,13 +4,49 @@
   "description": "A premium dark audiobook player",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build": "electron-builder --win"
+  },
+  "author": "Baker Alakhras",
+  "build": {
+    "appId": "com.grimoire.app",
+    "productName": "Grimoire",
+    "forceCodeSigning": false,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "scripts/**/*",
+      "package.json",
+      "node_modules/**/*",
+      "!node_modules/.cache/**",
+      "!node_modules/electron-builder/**",
+      "!node_modules/electron/**"
+    ],
+    "asar": false,
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Grimoire"
+    }
   },
   "devDependencies": {
-    "electron": "^29.1.0"
+    "electron": "^29.1.0",
+    "electron-builder": "^26.8.1"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@supabase/supabase-js": "^2.103.0",
     "@xenova/transformers": "^2.17.2",
     "fluent-ffmpeg": "^2.1.3"
   }

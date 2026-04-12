@@ -211,7 +211,18 @@
       <button class="icon-btn" id="btn-transcript" title="Transcript">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>
       </button>
+      <div id="sync-dot" class="sync-dot sync-idle" title=""></div>
+      <button class="icon-btn" id="btn-settings" title="Account &amp; settings">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+      </button>
     </div>
+  </div>
+
+  <!-- ── Settings Popup ── -->
+  <div id="settings-popup" class="popup settings-popup hidden">
+    <div class="popup-header">Account</div>
+    <p id="settings-email" class="settings-email"></p>
+    <button id="btn-logout" class="settings-menu-item btn-ghost">Sign Out</button>
   </div>
 
   <!-- ── Sleep Timer Popup ── -->
@@ -410,6 +421,25 @@
   </div>
 
 </div>
+  <!-- ── Auth Overlay ── -->
+  <div id="auth-overlay" class="auth-overlay hidden">
+    <div class="auth-card glass">
+      <h1 class="auth-title serif">Grimoire</h1>
+      <p class="auth-subtitle">Sign in to sync your library across devices</p>
+      <div id="auth-error" class="auth-error hidden"></div>
+      <div class="auth-form">
+        <input type="email" id="auth-email" placeholder="Email" class="auth-input" autocomplete="email">
+        <input type="password" id="auth-password" placeholder="Password" class="auth-input" autocomplete="current-password">
+        <button id="auth-submit" class="btn-primary auth-btn">Sign In</button>
+      </div>
+      <div class="auth-switch">
+        <span id="auth-switch-text">Don't have an account?</span>
+        <button id="auth-switch-btn" class="btn-ghost">Sign Up</button>
+      </div>
+      <button id="auth-skip" class="btn-ghost auth-skip">Use without account</button>
+    </div>
+  </div>
+
 <script src="renderer.js"></script>
 </body>
 </html>

@@ -39,9 +39,9 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           Now Playing
         </button>
-        <button class="nav-btn" data-view="cloud" id="nav-cloud">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
-          Cloud
+        <button class="nav-btn" data-view="catalog" id="nav-catalog">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="4" rx="1"/><rect x="3" y="10" width="18" height="4" rx="1"/><rect x="3" y="17" width="18" height="4" rx="1"/></svg>
+          Catalog
         </button>
       </nav>
 
@@ -69,15 +69,15 @@
       <!-- Library View -->
       <div id="library-view" class="view active">
         <div class="view-header">
-          <h1 class="view-title serif">Library</h1>
+          <h1 class="view-title serif">My Library</h1>
           <div class="view-header-actions">
             <div class="search-wrap">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-              <input type="text" id="search-input" placeholder="Search audiobooks…" autocomplete="off" spellcheck="false">
+              <input type="text" id="search-input" placeholder="Search library…" autocomplete="off" spellcheck="false">
             </div>
-            <button class="btn-primary" id="import-btn">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              Import
+            <button class="btn-ghost" id="import-btn" title="Import local folder">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              Local
             </button>
           </div>
         </div>
@@ -89,37 +89,42 @@
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
           </div>
           <h2 class="serif">Your library is empty</h2>
-          <p>Import a folder of audio files to get started</p>
-          <button class="btn-primary" id="import-btn-empty">Import audiobook folder</button>
+          <p>Browse the Catalog to add audiobooks, or import a local folder.</p>
+          <button class="btn-primary" id="import-btn-empty">Import local folder</button>
         </div>
       </div>
 
-      <!-- Cloud View -->
-      <div id="cloud-view" class="view hidden">
+      <!-- Catalog View -->
+      <div id="catalog-view" class="view hidden">
         <div class="view-header">
-          <h1 class="view-title serif">Cloud Library</h1>
+          <h1 class="view-title serif">Catalog</h1>
           <div class="view-header-actions">
-            <button class="icon-btn" id="cloud-refresh-btn" title="Refresh cloud library">
+            <div class="search-wrap">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input type="text" id="catalog-search-input" placeholder="Search catalog…" autocomplete="off" spellcheck="false">
+            </div>
+            <button class="icon-btn" id="catalog-refresh-btn" title="Refresh catalog">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             </button>
-            <button class="icon-btn" id="cloud-settings-btn" title="Cloud storage settings">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            <button class="btn-primary hidden" id="catalog-upload-btn">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Upload Version
             </button>
           </div>
         </div>
-        <div id="cloud-book-grid" class="book-grid"></div>
-        <div id="cloud-loading" class="empty-state hidden">
-          <div class="empty-icon cloud-spin">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
-          </div>
-          <p>Loading cloud library…</p>
-        </div>
-        <div id="cloud-empty" class="empty-state hidden">
+        <div id="catalog-content"></div>
+        <div id="catalog-loading" class="empty-state hidden">
           <div class="empty-icon">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="cloud-spin"><rect x="3" y="3" width="18" height="4" rx="1"/><rect x="3" y="10" width="18" height="4" rx="1"/><rect x="3" y="17" width="18" height="4" rx="1"/></svg>
           </div>
-          <h2 class="serif" id="cloud-empty-title">No books in the cloud</h2>
-          <p id="cloud-empty-msg">Upload books from your library to stream them on any device.</p>
+          <p>Loading catalog…</p>
+        </div>
+        <div id="catalog-empty" class="empty-state hidden">
+          <div class="empty-icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="3" y="3" width="18" height="4" rx="1"/><rect x="3" y="10" width="18" height="4" rx="1"/><rect x="3" y="17" width="18" height="4" rx="1"/></svg>
+          </div>
+          <h2 class="serif">Catalog is empty</h2>
+          <p id="catalog-empty-msg">No audiobooks in the catalog yet.</p>
         </div>
       </div>
 
@@ -256,8 +261,8 @@
   <div id="settings-popup" class="popup settings-popup hidden">
     <div class="popup-header">Account</div>
     <p id="settings-email" class="settings-email"></p>
+    <p id="settings-role" class="settings-role hidden"></p>
     <p id="sync-error-msg" class="sync-error-msg hidden"></p>
-    <button id="btn-s3-settings" class="settings-menu-item btn-ghost">Cloud Storage…</button>
     <div class="ctx-divider" style="margin:6px 0"></div>
     <button id="btn-logout" class="settings-menu-item btn-ghost">Sign Out</button>
   </div>
@@ -324,34 +329,96 @@
   <!-- ── Book Context Menu ── -->
   <div id="ctx-menu" class="ctx-menu hidden">
     <button class="ctx-item" id="ctx-open">▶ Open</button>
-    <button class="ctx-item" id="ctx-rename">✎ Rename</button>
+    <button class="ctx-item hidden" id="ctx-rename">✎ Rename</button>
     <button class="ctx-item" id="ctx-rate">☆ Rate…</button>
-    <button class="ctx-item" id="ctx-set-cover">⬡ Set Cover Art…</button>
-    <button class="ctx-item" id="ctx-set-bg">▣ Set Background…</button>
+    <button class="ctx-item hidden" id="ctx-set-cover">⬡ Set Cover Art…</button>
+    <button class="ctx-item hidden" id="ctx-set-bg">▣ Set Background…</button>
     <button class="ctx-item hidden" id="ctx-split">✂ Split into Chapters…</button>
-    <button class="ctx-item" id="ctx-transcribe">◎ Transcribe…</button>
+    <button class="ctx-item hidden" id="ctx-transcribe">◎ Transcribe…</button>
     <button class="ctx-item hidden" id="ctx-view-transcript">≡ View Transcript</button>
-    <button class="ctx-item hidden" id="ctx-upload-cloud">☁ Upload to cloud…</button>
-    <button class="ctx-item hidden" id="ctx-remove-cloud">✕ Remove from cloud</button>
-    <button class="ctx-item" id="ctx-reimport">↺ Re-import</button>
+    <button class="ctx-item hidden" id="ctx-reimport">↺ Re-import</button>
     <div class="ctx-divider"></div>
     <button class="ctx-item danger" id="ctx-delete">✕ Remove from library</button>
   </div>
 
-  <!-- ── Upload Modal ── -->
-  <div id="upload-modal" class="modal-backdrop hidden">
-    <div class="modal glass upload-modal-inner">
-      <h3>Uploading to Cloud</h3>
-      <p id="upload-book-name" class="upload-book-name"></p>
-      <div id="upload-file-list" class="upload-file-list"></div>
-      <div class="upload-overall-row">
-        <div class="upload-progress-bar"><div id="upload-overall-fill" class="upload-progress-fill"></div></div>
-        <span id="upload-overall-pct" class="upload-pct">0%</span>
+  <!-- ── Book Detail Modal (narrator version picker) ── -->
+  <div id="book-detail-modal" class="modal-backdrop hidden">
+    <div class="modal glass book-detail-inner">
+      <button class="modal-close-x" id="book-detail-close">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+      <div class="book-detail-top">
+        <div class="book-detail-cover-wrap" id="book-detail-cover-wrap"></div>
+        <div class="book-detail-meta">
+          <p id="book-detail-series" class="book-detail-series"></p>
+          <h2 class="serif" id="book-detail-title"></h2>
+          <p id="book-detail-author" class="book-detail-author"></p>
+        </div>
       </div>
-      <p id="upload-status-msg" class="upload-status-msg">Preparing…</p>
-      <div class="modal-footer">
-        <button class="btn-primary hidden" id="upload-done-btn">Done</button>
-        <button class="btn-ghost" id="upload-error-close" style="display:none">Close</button>
+      <div class="book-detail-versions-wrap">
+        <p class="book-detail-versions-label">Available Narrators</p>
+        <div id="book-detail-version-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Catalog Upload Modal ── -->
+  <div id="catalog-upload-modal" class="modal-backdrop hidden">
+    <div class="modal glass catalog-upload-inner">
+      <!-- Step 1: choose folder -->
+      <div class="cup-step" id="cup-step1">
+        <h3>Add Version to Catalog</h3>
+        <p class="cup-desc">Select a folder of MP3 files for one audiobook narrator version.</p>
+        <button class="btn-primary" id="cup-pick-folder">Choose Folder…</button>
+        <p id="cup-folder-display" class="cup-folder-display hidden"></p>
+        <div class="modal-footer">
+          <button class="btn-ghost" id="cup-step1-cancel">Cancel</button>
+          <button class="btn-primary hidden" id="cup-step1-next">Continue →</button>
+        </div>
+      </div>
+      <!-- Step 2: metadata -->
+      <div class="cup-step hidden" id="cup-step2">
+        <h3>Book Details</h3>
+        <div class="cup-form">
+          <label class="s3-label">Book Title *</label>
+          <input type="text" id="cup-title" class="auth-input" placeholder="e.g. Red Rising" autocomplete="off">
+          <label class="s3-label">Author</label>
+          <input type="text" id="cup-author" class="auth-input" placeholder="e.g. Pierce Brown" autocomplete="off">
+          <label class="s3-label">Series</label>
+          <input type="text" id="cup-series" class="auth-input" placeholder="e.g. Red Rising Saga" autocomplete="off">
+          <label class="s3-label">Series #</label>
+          <input type="number" id="cup-series-order" class="auth-input" placeholder="e.g. 1" min="1" max="999" autocomplete="off">
+          <label class="s3-label">Narrator *</label>
+          <input type="text" id="cup-narrator" class="auth-input" placeholder="e.g. Tim Gerard Reynolds" autocomplete="off">
+          <label class="s3-label">Cover Image</label>
+          <div class="cup-cover-row">
+            <button class="btn-ghost" id="cup-pick-cover">Choose Cover…</button>
+            <span id="cup-cover-display" class="cup-folder-display"></span>
+          </div>
+          <label class="s3-label">Match existing catalog book?</label>
+          <select id="cup-existing-book" class="auth-input cup-select">
+            <option value="">Create new catalog entry</option>
+          </select>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-ghost" id="cup-step2-back">← Back</button>
+          <button class="btn-primary" id="cup-step2-upload">Upload</button>
+        </div>
+      </div>
+      <!-- Step 3: progress -->
+      <div class="cup-step hidden" id="cup-step3">
+        <h3>Uploading…</h3>
+        <p id="cup-progress-msg" class="upload-status-msg">Preparing…</p>
+        <div class="upload-progress-bar cup-progress-bar"><div id="cup-progress-fill" class="upload-progress-fill"></div></div>
+        <p id="cup-progress-pct" class="upload-pct">0%</p>
+      </div>
+      <!-- Step 4: done -->
+      <div class="cup-step hidden" id="cup-step4">
+        <div class="split-done-icon">✓</div>
+        <p class="split-center-msg">Version added to catalog!</p>
+        <div class="modal-footer">
+          <button class="btn-primary" id="cup-done-btn">Done</button>
+        </div>
       </div>
     </div>
   </div>
@@ -360,7 +427,7 @@
   <div id="s3-modal" class="modal-backdrop hidden">
     <div class="modal glass">
       <h3>Cloud Storage Settings</h3>
-      <p class="s3-modal-desc">Enter your AWS S3 credentials. These are stored locally on this device only.</p>
+      <p class="s3-modal-desc">AWS S3 credentials for the shared Grimoire catalog bucket.</p>
       <div class="s3-form">
         <label class="s3-label">AWS Region</label>
         <input type="text" id="s3-region" class="auth-input" placeholder="us-east-1" autocomplete="off">
@@ -502,6 +569,17 @@
   </div>
 
 </div>
+  <!-- ── Approval Waiting Overlay ── -->
+  <div id="approval-overlay" class="auth-overlay hidden">
+    <div class="auth-card glass">
+      <h1 class="auth-title serif">Grimoire</h1>
+      <div class="approval-icon">⏳</div>
+      <p class="auth-subtitle">Waiting for approval</p>
+      <p class="approval-note">Your account has been created and is pending admin approval. Please check back later.</p>
+      <button id="approval-logout-btn" class="btn-ghost auth-skip">Sign Out</button>
+    </div>
+  </div>
+
   <!-- ── Auth Overlay ── -->
   <div id="auth-overlay" class="auth-overlay hidden">
     <div class="auth-card glass">

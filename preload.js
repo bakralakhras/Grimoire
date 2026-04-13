@@ -7,7 +7,8 @@ contextBridge.exposeInMainWorld('api', {
   close:    () => ipcRenderer.send('window:close'),
 
   // Library
-  openFolder:   ()       => ipcRenderer.invoke('dialog:openFolder'),
+  openFolder:      ()    => ipcRenderer.invoke('dialog:openFolder'),
+  openImageFile:   ()    => ipcRenderer.invoke('dialog:openImageFile'),
   importFolder: (p)      => ipcRenderer.invoke('library:import', p),
   getLibrary:   ()       => ipcRenderer.invoke('library:getAll'),
   getBook:      (id)     => ipcRenderer.invoke('library:getBook', id),
@@ -58,34 +59,36 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('ai:progress', (_e, data) => cb(data));
   },
 
-  // S3 cloud storage
+  // S3 cloud storage (config only — uploads go through catalog:upload)
   s3: {
-    getConfig:       ()        => ipcRenderer.invoke('s3:getConfig'),
-    saveConfig:      (cfg)     => ipcRenderer.invoke('s3:saveConfig', cfg),
-    testConfig:      ()        => ipcRenderer.invoke('s3:testConfig'),
-    uploadBook:      (bookId)  => ipcRenderer.invoke('s3:uploadBook', bookId),
-    getPresignedUrl: (data)    => ipcRenderer.invoke('s3:getPresignedUrl', data),
-    listCloudBooks:  ()        => ipcRenderer.invoke('s3:listCloudBooks'),
-    removeFromCloud: (bookId)  => ipcRenderer.invoke('s3:removeFromCloud', bookId),
-    onUploadProgress: (cb) => {
-      ipcRenderer.removeAllListeners('s3:uploadProgress');
-      ipcRenderer.on('s3:uploadProgress', (_e, data) => cb(data));
-    },
+    getConfig:       ()     => ipcRenderer.invoke('s3:getConfig'),
+    saveConfig:      (cfg)  => ipcRenderer.invoke('s3:saveConfig', cfg),
+    testConfig:      ()     => ipcRenderer.invoke('s3:testConfig'),
+    getPresignedUrl: (data) => ipcRenderer.invoke('s3:getPresignedUrl', data),
   },
 
-  // Cloud book cache (books accessible from other devices)
-  cloudBooks: {
-    getAll: ()     => ipcRenderer.invoke('cloudBooks:getAll'),
-    save:   (book) => ipcRenderer.invoke('cloudBooks:save', book),
+  // Catalog marketplace
+  catalog: {
+    getAll:            ()      => ipcRenderer.invoke('catalog:getAll'),
+    getUserLibrary:    ()      => ipcRenderer.invoke('catalog:getUserLibrary'),
+    addToLibrary:      (data)  => ipcRenderer.invoke('catalog:addToLibrary', data),
+    removeFromLibrary: (data)  => ipcRenderer.invoke('catalog:removeFromLibrary', data),
+    getPresignedUrl:   (data)  => ipcRenderer.invoke('catalog:getPresignedUrl', data),
+    upload:            (data)  => ipcRenderer.invoke('catalog:upload', data),
+    onUploadProgress:  (cb) => {
+      ipcRenderer.removeAllListeners('catalog:uploadProgress');
+      ipcRenderer.on('catalog:uploadProgress', (_e, data) => cb(data));
+    },
   },
 
   // Auth
   auth: {
-    getSession: ()       => ipcRenderer.invoke('auth:getSession'),
-    login:      (data)   => ipcRenderer.invoke('auth:login', data),
-    signup:     (data)   => ipcRenderer.invoke('auth:signup', data),
-    logout:     ()       => ipcRenderer.invoke('auth:logout'),
-    skip:       ()       => ipcRenderer.invoke('auth:skip'),
+    getSession:     ()     => ipcRenderer.invoke('auth:getSession'),
+    checkApproval:  ()     => ipcRenderer.invoke('auth:checkApproval'),
+    login:          (data) => ipcRenderer.invoke('auth:login', data),
+    signup:         (data) => ipcRenderer.invoke('auth:signup', data),
+    logout:         ()     => ipcRenderer.invoke('auth:logout'),
+    skip:           ()     => ipcRenderer.invoke('auth:skip'),
   },
 
   // Sync

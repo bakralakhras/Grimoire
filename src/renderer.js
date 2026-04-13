@@ -433,30 +433,41 @@ function setTranscriptStatus(msg, active = false) {
 // ── View switching ───────────────────────────────────────────────────────────
 function showView(name) {
   S.view = name;
-  toggle($('library-view'), name === 'library');
-  toggle($('player-view'), name === 'player');
-  toggle($('chapter-sidebar'), name === 'player');
+  toggle($('library-view'),  name === 'library');
+  toggle($('player-view'),   name === 'player');
+  toggle($('chapter-sidebar'),   name === 'player');
   toggle($('bookmarks-sidebar'), name === 'player');
-  toggle($('cloud-view'), name === 'cloud');
+  toggle($('catalog-view'),  name === 'catalog');
 
   $('nav-library').classList.toggle('active', name === 'library');
   $('nav-player').classList.toggle('active', name === 'player');
-  if ($('nav-cloud')) $('nav-cloud').classList.toggle('active', name === 'cloud');
+  if ($('nav-catalog')) $('nav-catalog').classList.toggle('active', name === 'catalog');
 
-  if (name === 'library') {
-    renderLibrary();
-  }
+  if (name === 'library')  renderLibrary();
+  if (name === 'catalog') renderCatalog();
 }
 
 // ── Library ──────────────────────────────────────────────────────────────────
 async function loadLibrary() {
-  S.books = await api.getLibrary();
+  const localBooks = await api.getLibrary();
+  if (authUser) {
+    const catRes = await api.catalog.getUserLibrary();
+    const catBooks = catRes.books || [];
+    // Merge: catalog books first (most recently added), then local books
+    S.books = [...catBooks, ...localBooks];
+  } else {
+    S.books = localBooks;
+  }
   renderLibrary();
 }
 
 function renderLibrary() {
   const q = S.searchQuery.toLowerCase();
-  const books = q ? S.books.filter(b => b.title.toLowerCase().includes(q)) : S.books;
+  const books = q
+    ? S.books.filter(b =>
+        b.title.toLowerCase().includes(q) ||
+        (b.author || '').toLowerCase().includes(q))
+    : S.books;
 
   if (books.length === 0 && !q) {
     hide($('book-grid')); show($('empty-library'));
@@ -467,23 +478,25 @@ function renderLibrary() {
   $('book-grid').innerHTML = books.map(bookCardHTML).join('');
 
   $('book-grid').querySelectorAll('.book-card').forEach(card => {
-    const id = card.dataset.id;
+    const id   = card.dataset.id;
     const book = S.books.find(b => b.id === id);
+    if (!book) return;
 
     // Initialise input stars to current rating
-    renderCardStars(card, book?.rating || 0);
-
-    // Star hover & click
-    card.querySelectorAll('.book-stars-input .si').forEach(si => {
-      si.addEventListener('mousemove', e => {
-        const pos = parseInt(si.dataset.pos, 10);
-        const val = e.offsetX < si.offsetWidth / 2 ? pos - 0.5 : pos;
-        renderCardStars(card, val);
-      });
-    });
-    card.querySelector('.book-stars-input').addEventListener('mouseleave', () => {
+    if (!book.isCatalog) {
       renderCardStars(card, book?.rating || 0);
-    });
+
+      card.querySelectorAll('.book-stars-input .si').forEach(si => {
+        si.addEventListener('mousemove', e => {
+          const pos = parseInt(si.dataset.pos, 10);
+          const val = e.offsetX < si.offsetWidth / 2 ? pos - 0.5 : pos;
+          renderCardStars(card, val);
+        });
+      });
+      card.querySelector('.book-stars-input')?.addEventListener('mouseleave', () => {
+        renderCardStars(card, book?.rating || 0);
+      });
+    }
 
     card.addEventListener('click', e => {
       if (e.target.closest('.book-stars-input')) {
@@ -496,44 +509,53 @@ function renderLibrary() {
       }
       openBook(id);
     });
+
+    // Context menu: catalog books get a simplified menu (remove from library only)
     card.addEventListener('contextmenu', e => showContextMenu(e, id));
   });
 }
 
 function bookCardHTML(book) {
-  const col = bookColor(book.title);
-  const pct = Math.round(bookProgress(book) * 100);
-  const isNow = S.currentBook?.id === book.id;
-  const coverUrl = book.coverPath ? pathToUrl(book.coverPath) : null;
-  const isCloud = book.isCloudOnly;
-  const hasCloud = !!book.cloudPaths || isCloud;
+  const col     = bookColor(book.title);
+  const pct     = Math.round(bookProgress(book) * 100);
+  const isNow   = S.currentBook?.id === book.id;
+  // Catalog books have coverUrl (presigned https URL), local books have coverPath
+  const imgUrl  = book.coverUrl || (book.coverPath ? pathToUrl(book.coverPath) : null);
+  const isCat   = !!book.isCatalog;
 
-  const coverStyle = coverUrl
-    ? `background: url('${coverUrl}') center/cover no-repeat`
+  const coverStyle = imgUrl
+    ? `background: url('${imgUrl}') center/cover no-repeat`
     : `background:${col.bg}; color:${col.text}`;
-  const coverInner = coverUrl ? '' : initials(book.title);
+  const coverInner = imgUrl ? '' : initials(book.title);
+
+  const metaLine = isCat
+    ? [book.author, book.narrator ? `narr. ${book.narrator}` : ''].filter(Boolean).join(' · ')
+    : `${book.chapterCount} chapter${book.chapterCount !== 1 ? 's' : ''}`;
 
   return `
-  <div class="book-card${isNow ? ' now-playing' : ''}${isCloud ? ' cloud-only-card' : ''}" data-id="${book.id}">
+  <div class="book-card${isNow ? ' now-playing' : ''}${isCat ? ' catalog-card' : ''}" data-id="${book.id}">
     ${isNow ? '<span class="now-playing-badge">Now Playing</span>' : ''}
-    ${hasCloud ? `<div class="cloud-badge" title="${isCloud ? 'Cloud only' : 'Uploaded to cloud'}"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>` : ''}
     <div class="book-cover" style="${coverStyle}">
-      ${isCloud ? `<div class="cloud-cover-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>` : coverInner}
+      ${coverInner}
       ${isNow ? `<div class="book-cover-eq"><div class="eq-bars${S.isPlaying ? '' : ' paused'}" style="transform:scale(0.8)"><span></span><span></span><span></span><span></span></div></div>` : ''}
     </div>
     <div class="book-card-info">
       <p class="book-card-title">${book.title}</p>
-      <p class="book-card-meta">${book.chapterCount} chapter${book.chapterCount !== 1 ? 's' : ''}${isCloud ? ' · Cloud' : ''}</p>
+      <p class="book-card-meta">${metaLine}</p>
       ${book.rating ? `<div class="book-stars-static">${starsStaticHTML(book.rating)}</div>` : ''}
-      ${!isCloud ? `<div class="book-stars-input">${starsInputHTML()}</div>` : ''}
-      ${!isCloud ? `<div class="progress-bar"><div class="progress-fill-bar" style="width:${pct}%"></div></div>` : ''}
-      ${!isCloud && pct > 0 ? `<p class="progress-pct">${pct}%</p>` : ''}
+      ${!isCat ? `<div class="book-stars-input">${starsInputHTML()}</div>` : ''}
+      <div class="progress-bar"><div class="progress-fill-bar" style="width:${pct}%"></div></div>
+      ${pct > 0 ? `<p class="progress-pct">${pct}%</p>` : ''}
     </div>
   </div>`;
 }
 
 // ── Open book ────────────────────────────────────────────────────────────────
 async function openBook(bookId) {
+  // Check if it's a catalog book (in S.books with isCatalog flag)
+  const catBook = S.books.find(b => b.id === bookId && b.isCatalog);
+  if (catBook) { openCatalogBook(catBook); return; }
+
   const book = await api.getBook(bookId);
   if (!book) return;
 
@@ -562,6 +584,34 @@ async function openBook(bookId) {
   playChapter(S.chapterIndex, pb?.position || 0);
 }
 
+async function openCatalogBook(book) {
+  if (!navigator.onLine) {
+    alert('No internet connection. Cannot stream this audiobook.');
+    return;
+  }
+
+  if ($('transcript-panel').classList.contains('open') && KARAOKE.loadedBookId !== book.id) {
+    closeTranscriptPanel();
+  }
+
+  // Reload from catalog to get fresh presigned cover URL if needed
+  const freshBook = S.books.find(b => b.id === book.id) || book;
+  S.currentBook = freshBook;
+
+  const pb = freshBook.playback || await api.getPlayback(freshBook.id);
+  S.chapterIndex = pb?.chapterIndex || 0;
+  S.speed = pb?.speed || 1;
+  S.bookmarks = await api.getBookmarks(freshBook.id);
+
+  $('nav-player').disabled = false;
+  renderChapterList();
+  renderBookmarks();
+  updatePlayerBarInfo();
+  showView('player');
+  updateNowPlayingDisplay();
+  playChapter(S.chapterIndex, pb?.position || 0);
+}
+
 // ── Player ───────────────────────────────────────────────────────────────────
 async function playChapter(index, startPos = 0) {
   const book = S.currentBook;
@@ -574,12 +624,26 @@ async function playChapter(index, startPos = 0) {
   audio.playbackRate = S.speed;
   audio.volume = S.volume;
 
-  // Resolve audio source: prefer local file, fall back to S3 presigned URL
+  // Resolve audio source
   let src;
-  if (chapter.filepath && !book.isCloudOnly) {
+  if (book.isCatalog) {
+    // Catalog book — stream from shared S3 via catalog presigned URL
+    if (!navigator.onLine) {
+      showPlayerMessage('No internet connection. Cannot stream this audiobook.', true);
+      return;
+    }
+    showPlayerMessage('Loading…', false);
+    const res = await api.catalog.getPresignedUrl({ s3Prefix: book.s3Prefix, filename: chapter.filename });
+    if (res.error) {
+      showPlayerMessage('Stream failed: ' + res.error, true);
+      return;
+    }
+    src = res.url;
+    clearPlayerMessage();
+  } else if (chapter.filepath && !book.isCloudOnly) {
     src = pathToUrl(chapter.filepath);
   } else {
-    // Cloud-only book or no local file — fetch presigned URL
+    // Legacy cloud-only book — fetch presigned URL via old handler
     if (!navigator.onLine) {
       showPlayerMessage('No internet connection. Cannot stream cloud audio.', true);
       return;
@@ -676,8 +740,9 @@ function updateNowPlayingDisplay() {
   const col = bookColor(book.title);
 
   // ── Album art thumbnail ──────────────────────────────────────────────────
-  if (book.coverPath) {
-    $('book-art').style.background = `url('${pathToUrl(book.coverPath)}') center/cover no-repeat`;
+  const artUrl = book.coverUrl || (book.coverPath ? pathToUrl(book.coverPath) : null);
+  if (artUrl) {
+    $('book-art').style.background = `url('${artUrl}') center/cover no-repeat`;
     $('book-art-text').style.display = 'none';
   } else {
     $('book-art').style.background = col.bg;
@@ -687,14 +752,12 @@ function updateNowPlayingDisplay() {
   }
 
   // ── Immersive blurred background ─────────────────────────────────────────
-  // Priority: custom bg > cover art > vivid hue-derived gradient.
-  // Use cssText to set all properties atomically — avoids cascade/ordering bugs.
-  const bgSrc = book.bgPath || book.coverPath || null;
+  const bgSrc = book.bgPath || book.coverUrl || book.coverPath || null;
   const bg = $('player-bg');
   if (bgSrc) {
     bg.style.cssText = [
       'position:absolute', 'inset:-80px', 'z-index:0',
-      `background-image:url('${pathToUrl(bgSrc)}')`,
+      `background-image:url('${bgSrc.startsWith('http') ? bgSrc : pathToUrl(bgSrc)}')`,
       'background-size:cover', 'background-position:center',
       'filter:blur(60px) brightness(0.25) saturate(1.4)',
     ].join(';') + ';';
@@ -726,8 +789,9 @@ function updatePlayerBarInfo() {
   const chapter = book.chapters[S.chapterIndex];
   const col = bookColor(book.title);
 
-  if (book.coverPath) {
-    $('mini-art').style.background = `url('${pathToUrl(book.coverPath)}') center/cover no-repeat`;
+  const miniArtUrl = book.coverUrl || (book.coverPath ? pathToUrl(book.coverPath) : null);
+  if (miniArtUrl) {
+    $('mini-art').style.background = `url('${miniArtUrl}') center/cover no-repeat`;
     $('mini-art-text').style.display = 'none';
   } else {
     $('mini-art').style.background = col.bg;
@@ -1009,22 +1073,25 @@ async function showContextMenu(e, bookId) {
 
   hide($('ctx-view-transcript'));
 
-  // Only show split option for single-file books
   const book = S.books.find(b => b.id === bookId);
-  toggle($('ctx-split'), book?.chapterCount === 1);
+  const isCat = !!book?.isCatalog;
 
-  // Cloud upload/remove options (only when logged in)
-  const hasCloud = !!book?.cloudPaths;
-  const canCloud = !!authUser;
-  toggle($('ctx-upload-cloud'), canCloud && !hasCloud);
-  toggle($('ctx-remove-cloud'), canCloud && hasCloud);
+  // Local-only options
+  toggle($('ctx-rename'),    !isCat);
+  toggle($('ctx-set-cover'), !isCat);
+  toggle($('ctx-set-bg'),    !isCat);
+  toggle($('ctx-split'),     !isCat && book?.chapterCount === 1);
+  toggle($('ctx-transcribe'),!isCat);
+  toggle($('ctx-reimport'),  !isCat);
 
   show(menu);
 
-  const transcript = await api.getTranscript(bookId);
-  S.ctxTranscript = transcript;
-  if (!menu.classList.contains('hidden')) {
-    toggle($('ctx-view-transcript'), !!transcript);
+  if (!isCat) {
+    const transcript = await api.getTranscript(bookId);
+    S.ctxTranscript = transcript;
+    if (!menu.classList.contains('hidden')) {
+      toggle($('ctx-view-transcript'), !!transcript);
+    }
   }
 }
 
@@ -1146,6 +1213,7 @@ function setupUI() {
   // Nav
   $('nav-library').addEventListener('click', () => showView('library'));
   $('nav-player').addEventListener('click', () => { if (S.currentBook) showView('player'); });
+  $('nav-catalog').addEventListener('click', () => showView('catalog'));
 
   // Import
   $('import-btn').addEventListener('click', importBook);
@@ -1416,7 +1484,11 @@ function setupUI() {
     const book = S.books.find(b => b.id === S.ctxBookId);
     if (!book) return;
     if (!confirm(`Remove "${book.title}" from library?`)) return;
-    await api.deleteBook(book.id);
+    if (book.isCatalog) {
+      await api.catalog.removeFromLibrary({ versionId: book.id });
+    } else {
+      await api.deleteBook(book.id);
+    }
     S.books = S.books.filter(b => b.id !== book.id);
     if (S.currentBook?.id === book.id) {
       audio.pause();
@@ -1450,52 +1522,20 @@ function setupUI() {
   // Save on page unload
   window.addEventListener('beforeunload', () => savePlayback());
 
-  // ── Cloud nav ─────────────────────────────────────────────────────────────
-  $('nav-cloud').addEventListener('click', () => {
-    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-    $('nav-cloud').classList.add('active');
-    showView('cloud');
-    renderCloudLibrary();
+  // ── Approval overlay ──────────────────────────────────────────────────────
+  $('approval-logout-btn').addEventListener('click', async () => {
+    await api.auth.logout();
+    authUser = null;
+    hide($('approval-overlay'));
+    show($('auth-overlay'));
+    setAuthMode('login');
   });
 
-  $('cloud-refresh-btn').addEventListener('click', renderCloudLibrary);
+  // ── Catalog refresh ────────────────────────────────────────────────────────
+  $('catalog-refresh-btn').addEventListener('click', () => renderCatalog(true));
 
-  $('cloud-settings-btn').addEventListener('click', () => {
-    hide($('settings-popup'));
-    openS3SettingsModal();
-  });
-
-  // ── Cloud context menu items ───────────────────────────────────────────────
-  $('ctx-upload-cloud').addEventListener('click', async () => {
-    hideContextMenu();
-    const book = S.books.find(b => b.id === S.ctxBookId);
-    if (!book) return;
-    startUpload(book);
-  });
-
-  $('ctx-remove-cloud').addEventListener('click', async () => {
-    hideContextMenu();
-    const book = S.books.find(b => b.id === S.ctxBookId);
-    if (!book) return;
-    if (!confirm(`Remove "${book.title}" from cloud storage? Local files are kept.`)) return;
-    const res = await api.s3.removeFromCloud(book.id);
-    if (res.error) { alert('Remove failed: ' + res.error); return; }
-    delete book.cloudPaths; delete book.cloudStatus;
-    renderLibrary();
-  });
-
-  // ── Upload modal ──────────────────────────────────────────────────────────
-  $('upload-done-btn').addEventListener('click', () => {
-    hide($('upload-modal'));
-    renderLibrary();
-  });
-  $('upload-error-close').addEventListener('click', () => hide($('upload-modal')));
-
-  // ── S3 settings modal ──────────────────────────────────────────────────────
-  $('btn-s3-settings').addEventListener('click', () => {
-    hide($('settings-popup'));
-    openS3SettingsModal();
-  });
+  // ── Catalog upload button ──────────────────────────────────────────────────
+  $('catalog-upload-btn').addEventListener('click', openCatalogUploadModal);
 
   $('s3-modal-cancel').addEventListener('click', () => hide($('s3-modal')));
   $('s3-modal').addEventListener('click', e => { if (e.target === $('s3-modal')) hide($('s3-modal')); });
@@ -1529,12 +1569,15 @@ function setupUI() {
     hide($('settings-popup'));
     await api.auth.logout();
     authUser = null;
+    S.books = S.books.filter(b => !b.isCatalog); // remove catalog books from view
     updateSyncDot('idle');
     setAuthMode('login');
     $('auth-email').value = '';
     $('auth-password').value = '';
     hide($('auth-error'));
+    hide($('approval-overlay'));
     show($('auth-overlay'));
+    renderLibrary();
   });
 
   // ── Auth overlay ──────────────────────────────────────────────────────────
@@ -1820,143 +1863,314 @@ function setupSplitModal() {
   });
 }
 
-// ── Cloud library ─────────────────────────────────────────────────────────────
+// ── Catalog view ──────────────────────────────────────────────────────────────
 
-function cloudBookCardHTML(book) {
+let _catalogCache = null;
+
+function catalogBookCardHTML(book) {
   const col = bookColor(book.title);
-  const isLocal = !!S.books.find(b => b.id === book.id);
+  const inLib = S.books.some(b => b.catalogId === book.id || (b.isCatalog && b.catalogId === book.id));
   const coverStyle = book.coverUrl
     ? `background: url('${book.coverUrl}') center/cover no-repeat`
     : `background:${col.bg}; color:${col.text}`;
-  const coverInner = book.coverUrl
-    ? ''
-    : `<div class="cloud-cover-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>`;
+  const coverInner = book.coverUrl ? '' : initials(book.title);
+  const vCount = book.versions?.length || 0;
   return `
-  <div class="book-card cloud-only-card" data-id="${book.id}">
-    <div class="cloud-badge" title="${isLocal ? 'Local + Cloud' : 'Cloud only'}"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>
+  <div class="book-card catalog-browse-card${inLib ? ' in-library' : ''}" data-id="${book.id}">
+    ${inLib ? '<span class="in-lib-badge">In Library</span>' : ''}
     <div class="book-cover" style="${coverStyle}">${coverInner}</div>
     <div class="book-card-info">
       <p class="book-card-title">${book.title}</p>
-      <p class="book-card-meta">${book.chapterCount} chapter${book.chapterCount !== 1 ? 's' : ''} · ${isLocal ? 'Local + Cloud' : 'Cloud only'}</p>
+      ${book.author ? `<p class="book-card-meta">${book.author}</p>` : ''}
+      <p class="book-card-sub">${vCount} narrator version${vCount !== 1 ? 's' : ''}</p>
     </div>
   </div>`;
 }
 
-async function renderCloudLibrary() {
-  show($('cloud-loading')); hide($('cloud-empty')); $('cloud-book-grid').innerHTML = '';
+async function renderCatalog(forceRefresh = false) {
+  const content = $('catalog-content');
 
   if (!authUser) {
-    hide($('cloud-loading'));
-    $('cloud-empty-title').textContent = 'Sign in required';
-    $('cloud-empty-msg').textContent = 'Sign in to access your cloud library.';
-    show($('cloud-empty')); return;
+    content.innerHTML = '';
+    $('catalog-empty-msg').textContent = 'Sign in to browse the catalog.';
+    hide($('catalog-loading')); show($('catalog-empty')); return;
   }
 
-  const result = await api.s3.listCloudBooks();
-  hide($('cloud-loading'));
-
-  if (result.error) {
-    $('cloud-empty-title').textContent = 'Cannot connect';
-    $('cloud-empty-msg').textContent = result.error === 'S3 not configured'
-      ? 'Configure cloud storage settings to use this feature.'
-      : (navigator.onLine ? result.error : 'No internet connection. Cloud library is unavailable offline.');
-    show($('cloud-empty')); return;
-  }
-
-  const { books } = result;
-  if (books.length === 0) {
-    $('cloud-empty-title').textContent = 'No books in the cloud';
-    $('cloud-empty-msg').textContent = 'Upload books from your library to stream them on any device.';
-    show($('cloud-empty')); return;
-  }
-
-  // Cache for offline access
-  for (const book of books) await api.cloudBooks.save(book);
-
-  show($('cloud-book-grid'));
-  $('cloud-book-grid').innerHTML = books.map(cloudBookCardHTML).join('');
-  $('cloud-book-grid').querySelectorAll('.book-card').forEach(card => {
-    const id = card.dataset.id;
-    const cloudBook = books.find(b => b.id === id);
-    card.addEventListener('click', () => openCloudBook(cloudBook));
-  });
-}
-
-async function openCloudBook(cloudBook) {
-  // If local copy exists, open it normally
-  const local = S.books.find(b => b.id === cloudBook.id);
-  if (local) { openBook(cloudBook.id); return; }
-
-  if (!navigator.onLine) {
-    alert('No internet connection. This cloud book is not available offline.');
+  if (!forceRefresh && _catalogCache) {
+    _renderCatalogContent(_catalogCache);
     return;
   }
 
-  // Build a playable cloud-only book object
-  const book = {
-    ...cloudBook,
-    isCloudOnly: true,
-    folderPath: null, coverPath: cloudBook.coverUrl || null, bgPath: null,
-  };
+  content.innerHTML = '';
+  show($('catalog-loading')); hide($('catalog-empty'));
 
-  // Restore saved position (pulled from Supabase on login)
-  const pb = await api.getPlayback(cloudBook.id);
+  const result = await api.catalog.getAll();
+  hide($('catalog-loading'));
 
-  S.currentBook = book;
-  S.chapterIndex = pb?.chapterIndex || 0;
-  S.speed = pb?.speed || 1;
-  S.bookmarks = [];
-  $('nav-player').disabled = false;
-  renderChapterList();
-  renderBookmarks();
-  updatePlayerBarInfo();
-  showView('player');
-  updateNowPlayingDisplay();
-  playChapter(S.chapterIndex, pb?.position || 0);
+  if (result.error) {
+    $('catalog-empty-msg').textContent = 'Failed to load catalog: ' + result.error;
+    show($('catalog-empty')); return;
+  }
+
+  _catalogCache = result.books;
+  _renderCatalogContent(_catalogCache);
 }
 
-// ── Upload ─────────────────────────────────────────────────────────────────────
+function _renderCatalogContent(books) {
+  const q = ($('catalog-search-input')?.value || '').toLowerCase();
+  let filtered = q
+    ? books.filter(b =>
+        b.title.toLowerCase().includes(q) ||
+        (b.author || '').toLowerCase().includes(q) ||
+        (b.series || '').toLowerCase().includes(q))
+    : books;
 
-function startUpload(book) {
-  $('upload-book-name').textContent = book.title;
-  $('upload-file-list').innerHTML = book.chapters
-    .map((ch, i) => `<div class="upload-file-row" id="ufile-${i}">
-      <span class="upload-file-name">${ch.title || ch.filename}</span>
-      <span class="upload-file-pct" id="ufile-pct-${i}">—</span>
-    </div>`).join('');
-  $('upload-overall-fill').style.width = '0%';
-  $('upload-overall-pct').textContent = '0%';
-  $('upload-status-msg').textContent = 'Starting upload…';
-  hide($('upload-done-btn'));
-  $('upload-error-close').style.display = 'none';
-  show($('upload-modal'));
+  const content = $('catalog-content');
+  hide($('catalog-loading'));
 
-  api.s3.onUploadProgress(data => {
-    if (data.bookId !== book.id) return;
-    const row = $(`ufile-${data.chapterIndex}`);
-    const pctEl = $(`ufile-pct-${data.chapterIndex}`);
-    if (pctEl) pctEl.textContent = data.filePct + '%';
-    if (row) row.className = 'upload-file-row' + (data.status === 'done' ? ' done' : data.status === 'error' ? ' error' : ' active');
-    const op = data.overallPct || 0;
-    $('upload-overall-fill').style.width = op + '%';
-    $('upload-overall-pct').textContent = op + '%';
-    if (data.status === 'uploading') $('upload-status-msg').textContent = `Uploading ${data.chapterTitle}…`;
-    else if (data.status === 'done' && data.chapterIndex >= data.chapterTotal - 1) $('upload-status-msg').textContent = 'Finalising…';
+  if (filtered.length === 0) {
+    content.innerHTML = '';
+    $('catalog-empty-msg').textContent = q ? 'No matching books.' : 'No audiobooks in the catalog yet.';
+    show($('catalog-empty')); return;
+  }
+  hide($('catalog-empty'));
+
+  // Group by series; standalone books (no series) go in a separate group
+  const seriesMap = new Map(); // series name → [{book}]
+  const standalone = [];
+
+  for (const book of filtered) {
+    if (book.series) {
+      if (!seriesMap.has(book.series)) seriesMap.set(book.series, []);
+      seriesMap.get(book.series).push(book);
+    } else {
+      standalone.push(book);
+    }
+  }
+
+  let html = '';
+
+  // Series sections
+  for (const [seriesName, seriesBooks] of seriesMap) {
+    html += `<div class="catalog-section">
+      <h2 class="catalog-section-title serif">${escHtml(seriesName)}</h2>
+      <div class="book-grid">${seriesBooks.map(catalogBookCardHTML).join('')}</div>
+    </div>`;
+  }
+
+  // Standalone section
+  if (standalone.length) {
+    const label = seriesMap.size > 0 ? 'Standalone' : 'All Books';
+    html += `<div class="catalog-section">
+      <h2 class="catalog-section-title serif">${label}</h2>
+      <div class="book-grid">${standalone.map(catalogBookCardHTML).join('')}</div>
+    </div>`;
+  }
+
+  content.innerHTML = html;
+
+  content.querySelectorAll('.catalog-browse-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const book = filtered.find(b => b.id === card.dataset.id);
+      if (book) openBookDetailModal(book);
+    });
+  });
+}
+
+function openBookDetailModal(book) {
+  const col = bookColor(book.title);
+  const artUrl = book.coverUrl;
+
+  // Cover
+  const wrap = $('book-detail-cover-wrap');
+  if (artUrl) {
+    wrap.innerHTML = `<img src="${artUrl}" class="book-detail-cover-img" alt="Cover">`;
+  } else {
+    wrap.innerHTML = `<div class="book-detail-cover-placeholder" style="background:${col.bg};color:${col.text}">${initials(book.title)}</div>`;
+  }
+
+  $('book-detail-title').textContent = book.title;
+  $('book-detail-author').textContent = book.author || '';
+  const seriesEl = $('book-detail-series');
+  if (book.series) {
+    seriesEl.textContent = book.series + (book.series_order ? ` #${book.series_order}` : '');
+    show(seriesEl);
+  } else {
+    seriesEl.textContent = '';
+    hide(seriesEl);
+  }
+
+  // Versions
+  const vList = $('book-detail-version-list');
+  if (!book.versions?.length) {
+    vList.innerHTML = '<p class="catalog-no-versions">No narrator versions available yet.</p>';
+  } else {
+    vList.innerHTML = book.versions.map(v => {
+      const alreadyAdded = S.books.some(b => b.isCatalog && b.id === v.id);
+      return `
+      <div class="version-row" data-version-id="${v.id}" data-book-id="${book.id}">
+        <div class="version-info">
+          <span class="version-narrator">${v.narrator || 'Unknown narrator'}</span>
+          <span class="version-chapters">${v.chapter_count} chapter${v.chapter_count !== 1 ? 's' : ''}</span>
+        </div>
+        <button class="btn-primary version-add-btn${alreadyAdded ? ' already-added' : ''}"
+          data-version-id="${v.id}" data-book-id="${book.id}"
+          ${alreadyAdded ? 'disabled' : ''}>
+          ${alreadyAdded ? 'In Library' : 'Add to Library'}
+        </button>
+      </div>`;
+    }).join('');
+
+    vList.querySelectorAll('.version-add-btn:not([disabled])').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const versionId = btn.dataset.versionId;
+        const bookId    = btn.dataset.bookId;
+        btn.disabled    = true;
+        btn.textContent = 'Adding…';
+        const res = await api.catalog.addToLibrary({ bookId, versionId });
+        if (res.error) {
+          btn.disabled    = false;
+          btn.textContent = 'Add to Library';
+          alert('Error: ' + res.error);
+        } else {
+          btn.textContent = 'In Library';
+          btn.classList.add('already-added');
+          // Refresh library silently
+          await loadLibrary();
+          // Update catalog card badge
+          if (_catalogCache) _renderCatalogContent(_catalogCache);
+        }
+      });
+    });
+  }
+
+  show($('book-detail-modal'));
+}
+
+// ── Catalog upload modal ───────────────────────────────────────────────────────
+
+const CUP = { folderPath: null, coverPath: null };
+
+function showCupStep(stepId) {
+  ['cup-step1','cup-step2','cup-step3','cup-step4'].forEach(id => {
+    toggle($(id), id === stepId);
+  });
+}
+
+async function openCatalogUploadModal() {
+  CUP.folderPath = null;
+  CUP.coverPath  = null;
+  $('cup-folder-display').textContent = '';
+  hide($('cup-folder-display'));
+  hide($('cup-step1-next'));
+  $('cup-title').value = '';
+  $('cup-author').value = '';
+  $('cup-series').value = '';
+  $('cup-series-order').value = '';
+  $('cup-narrator').value = '';
+  $('cup-cover-display').textContent = '';
+
+  // Populate existing catalog books for matching
+  const existing = $('cup-existing-book');
+  existing.innerHTML = '<option value="">Create new catalog entry</option>';
+  if (_catalogCache) {
+    _catalogCache.forEach(b => {
+      const opt = document.createElement('option');
+      opt.value       = b.id;
+      opt.textContent = b.title + (b.author ? ` — ${b.author}` : '');
+      existing.appendChild(opt);
+    });
+  }
+
+  showCupStep('cup-step1');
+  show($('catalog-upload-modal'));
+}
+
+function setupCatalogUploadModal() {
+  $('cup-step1-cancel').addEventListener('click', () => hide($('catalog-upload-modal')));
+  $('catalog-upload-modal').addEventListener('click', e => {
+    if (e.target === $('catalog-upload-modal')) hide($('catalog-upload-modal'));
   });
 
-  api.s3.uploadBook(book.id).then(res => {
-    if (res.error) {
-      $('upload-status-msg').textContent = 'Error: ' + res.error;
-      $('upload-error-close').style.display = '';
-    } else {
-      $('upload-status-msg').textContent = 'Upload complete!';
-      $('upload-overall-fill').style.width = '100%';
-      $('upload-overall-pct').textContent = '100%';
-      // Update in-memory book so cloud badge appears immediately
-      const lb = S.books.find(b => b.id === book.id);
-      if (lb) { lb.cloudPaths = res.cloudPaths; lb.cloudStatus = 'cloud'; }
-      show($('upload-done-btn'));
+  $('cup-pick-folder').addEventListener('click', async () => {
+    const folder = await api.openFolder();
+    if (!folder) return;
+    CUP.folderPath = folder;
+    $('cup-folder-display').textContent = folder.split(/[\\/]/).pop();
+    show($('cup-folder-display'));
+    show($('cup-step1-next'));
+  });
+
+  $('cup-step1-next').addEventListener('click', () => {
+    if (!CUP.folderPath) return;
+    // Pre-fill title from folder name
+    if (!$('cup-title').value) {
+      $('cup-title').value = CUP.folderPath.split(/[\\/]/).pop().replace(/[_-]/g, ' ').trim();
     }
+    showCupStep('cup-step2');
+  });
+
+  $('cup-pick-cover').addEventListener('click', async () => {
+    const filePath = await api.openImageFile();
+    if (!filePath) return;
+    CUP.coverPath = filePath;
+    $('cup-cover-display').textContent = filePath.split(/[\\/]/).pop();
+  });
+
+  $('cup-step2-back').addEventListener('click', () => showCupStep('cup-step1'));
+
+  $('cup-step2-upload').addEventListener('click', async () => {
+    const title    = $('cup-title').value.trim();
+    const narrator = $('cup-narrator').value.trim();
+    if (!title)    { alert('Book title is required.'); return; }
+    if (!narrator) { alert('Narrator name is required.'); return; }
+
+    const existingBookId = $('cup-existing-book').value || null;
+    showCupStep('cup-step3');
+    $('cup-progress-fill').style.width = '0%';
+    $('cup-progress-pct').textContent = '0%';
+    $('cup-progress-msg').textContent = 'Starting…';
+
+    api.catalog.onUploadProgress(data => {
+      const pct = data.progress || 0;
+      $('cup-progress-fill').style.width = pct + '%';
+      $('cup-progress-pct').textContent   = pct + '%';
+      $('cup-progress-msg').textContent   = data.message || '';
+    });
+
+    const res = await api.catalog.upload({
+      folderPath:      CUP.folderPath,
+      title,
+      author:          $('cup-author').value.trim() || null,
+      series:          $('cup-series').value.trim() || null,
+      seriesOrder:     $('cup-series-order').value || null,
+      narrator,
+      existingBookId,
+      coverPath:       CUP.coverPath || null,
+    });
+
+    if (res.error) {
+      $('cup-progress-msg').textContent = 'Error: ' + res.error;
+      $('cup-progress-fill').style.width = '0%';
+      setTimeout(() => showCupStep('cup-step2'), 2000);
+    } else {
+      showCupStep('cup-step4');
+      _catalogCache = null; // invalidate so next open refreshes
+    }
+  });
+
+  $('cup-done-btn').addEventListener('click', () => {
+    hide($('catalog-upload-modal'));
+    renderCatalog(true);
+  });
+
+  $('book-detail-close').addEventListener('click', () => hide($('book-detail-modal')));
+  $('book-detail-modal').addEventListener('click', e => {
+    if (e.target === $('book-detail-modal')) hide($('book-detail-modal'));
+  });
+
+  $('catalog-search-input').addEventListener('input', () => {
+    if (_catalogCache) _renderCatalogContent(_catalogCache);
   });
 }
 
@@ -2003,16 +2217,34 @@ async function checkAuthAndPull() {
   if (session?.user) {
     authUser = session.user;
     hide($('auth-overlay'));
+    // Check approval before granting access
+    const approval = await api.auth.checkApproval();
+    if (!approval.approved) {
+      show($('approval-overlay'));
+      $('settings-email').textContent = authUser.email;
+      return;
+    }
+    hide($('approval-overlay'));
+    $('settings-email').textContent = authUser.email;
+    updateApprovedUI();
     api.sync.onStatus(updateSyncDot);
     updateSyncDot('syncing');
     const res = await api.sync.pull();
     if (!res.error) await loadLibrary();
   } else if (session?.skipped) {
     hide($('auth-overlay'));
+    hide($('approval-overlay'));
   } else {
     show($('auth-overlay'));
+    hide($('approval-overlay'));
     setAuthMode('login');
   }
+}
+
+function updateApprovedUI() {
+  // Show upload button in catalog view only for logged-in (approved) users
+  const btn = $('catalog-upload-btn');
+  if (btn) toggle(btn, !!authUser);
 }
 
 async function handleAuthSubmit() {
@@ -2041,6 +2273,15 @@ async function handleAuthSubmit() {
   } else {
     authUser = result.user;
     hide($('auth-overlay'));
+    $('settings-email').textContent = authUser.email;
+    // Check approval before granting access
+    const approval = await api.auth.checkApproval();
+    if (!approval.approved) {
+      show($('approval-overlay'));
+      return;
+    }
+    hide($('approval-overlay'));
+    updateApprovedUI();
     api.sync.onStatus(updateSyncDot);
     updateSyncDot('syncing');
     const res = await api.sync.pull();
@@ -2055,6 +2296,7 @@ async function init() {
   setupKeys();
   setupUI();
   setupSplitModal();
+  setupCatalogUploadModal();
   updateVolSlider();
   await loadLibrary();
   await checkAuthAndPull();

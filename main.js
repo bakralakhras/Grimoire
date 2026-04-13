@@ -296,6 +296,7 @@ app.whenReady().then(async () => {
   db = loadDb();
   initSupabase();
   loadQueue();
+  setAuthSkipped(false); // clear any stale skip state — auth is now required
   await loadSession();
   createWindow();
   registerIPC();
@@ -1002,6 +1003,11 @@ function registerIPC() {
     try {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) return { error: error.message };
+      // Explicitly set session so all subsequent requests carry the JWT
+      await supabase.auth.setSession({
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token,
+      });
       currentUser = data.user;
       saveSession(data.session);
       setAuthSkipped(false);
@@ -1015,6 +1021,11 @@ function registerIPC() {
       const { data, error } = await supabase.auth.signUp({ email, password });
       if (error) return { error: error.message };
       if (data.session) {
+        // Explicitly set session so all subsequent requests carry the JWT
+        await supabase.auth.setSession({
+          access_token: data.session.access_token,
+          refresh_token: data.session.refresh_token,
+        });
         currentUser = data.user;
         saveSession(data.session);
         setAuthSkipped(false);
@@ -1031,6 +1042,12 @@ function registerIPC() {
     offlineQueue = [];
     saveQueue();
     setSyncStatus('idle');
+    // Wipe all local user data so it doesn't bleed into the next account
+    db.books = {};
+    db.playback = {};
+    db.bookmarks = {};
+    db.cloudBooks = {};
+    saveDb();
     return true;
   });
 
@@ -1136,7 +1153,8 @@ function registerIPC() {
   ipcMain.handle('auth:checkApproval', async () => {
     if (!supabase || !currentUser) return { error: 'Not logged in' };
     const ADMIN_EMAIL = 'bakrferas@gmail.com';
-    const isAdmin = currentUser.email === ADMIN_EMAIL;
+    // Admin always approved — short-circuit before any DB call
+    if (currentUser.email === ADMIN_EMAIL) return { approved: true };
     try {
       const { data, error } = await supabase
         .from('user_profiles')
@@ -1144,50 +1162,47 @@ function registerIPC() {
         .eq('user_id', currentUser.id)
         .single();
       if (error?.code === 'PGRST116') {
-        // Profile does not exist — create with approved=false (or true for admin)
+        // Profile does not exist — create with approved=false
         await supabase.from('user_profiles').insert({
           user_id: currentUser.id,
           email: currentUser.email,
-          approved: isAdmin,
+          approved: false,
         });
-        return { approved: isAdmin };
+        return { approved: false };
       }
       if (error) return { error: error.message };
-      return { approved: isAdmin || !!data.approved };
+      return { approved: !!data.approved };
     } catch (e) { return { error: e.message }; }
   });
 
-  // ── Catalog ───────────────────────────────────────────────────────────────────
+  // ── Marketplace ───────────────────────────────────────────────────────────────
+
+  async function catalogCoverUrl(coverS3Key, cfg) {
+    if (!coverS3Key || !cfg?.accessKeyId) return null;
+    try {
+      const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+      const { GetObjectCommand } = require('@aws-sdk/client-s3');
+      return await getSignedUrl(
+        createS3Client(cfg),
+        new GetObjectCommand({ Bucket: cfg.bucket, Key: coverS3Key }),
+        { expiresIn: 7200 }
+      );
+    } catch { return null; }
+  }
 
   ipcMain.handle('catalog:getAll', async () => {
     if (!supabase) return { error: 'Supabase unavailable' };
     try {
-      const [{ data: books, error: bErr }, { data: versions, error: vErr }] = await Promise.all([
-        supabase.from('catalog').select('*')
-          .order('series',       { ascending: true, nullsFirst: false })
-          .order('series_order', { ascending: true, nullsFirst: true })
-          .order('title',        { ascending: true }),
-        supabase.from('catalog_versions').select('id, book_id, narrator, chapter_count'),
-      ]);
-      if (bErr) return { error: bErr.message };
-      if (vErr) return { error: vErr.message };
-
+      const { data: books, error } = await supabase
+        .from('catalog').select('*')
+        .order('series',       { ascending: true, nullsFirst: false })
+        .order('series_order', { ascending: true, nullsFirst: true })
+        .order('title',        { ascending: true });
+      if (error) return { error: error.message };
       const cfg = loadS3Config();
-      const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-      const { GetObjectCommand } = require('@aws-sdk/client-s3');
-      const s3c = cfg?.accessKeyId ? createS3Client(cfg) : null;
-
-      const result = await Promise.all(books.map(async book => {
-        let coverUrl = null;
-        if (book.cover_s3_key && s3c) {
-          try {
-            coverUrl = await getSignedUrl(s3c,
-              new GetObjectCommand({ Bucket: cfg.bucket, Key: book.cover_s3_key }),
-              { expiresIn: 7200 });
-          } catch {}
-        }
-        return { ...book, coverUrl, versions: versions.filter(v => v.book_id === book.id) };
-      }));
+      const result = await Promise.all(books.map(async b => ({
+        ...b, coverUrl: await catalogCoverUrl(b.cover_s3_key, cfg),
+      })));
       return { books: result };
     } catch (e) { return { error: e.message }; }
   });
@@ -1195,88 +1210,69 @@ function registerIPC() {
   ipcMain.handle('catalog:getUserLibrary', async () => {
     if (!supabase || !currentUser) return { error: 'Not logged in' };
     try {
-      const { data, error } = await supabase
-        .from('user_library')
-        .select('book_id, version_id, added_at')
+      const { data: entries, error } = await supabase
+        .from('user_library').select('book_id, added_at')
         .eq('user_id', currentUser.id);
       if (error) return { error: error.message };
-      if (!data.length) return { books: [] };
+      if (!entries.length) return { books: [] };
 
-      const versionIds = data.map(r => r.version_id);
-      const bookIds    = [...new Set(data.map(r => r.book_id))];
-      const [{ data: versions, error: vErr }, { data: catBooks, error: bErr }] = await Promise.all([
-        supabase.from('catalog_versions').select('*').in('id', versionIds),
-        supabase.from('catalog').select('*').in('id', bookIds),
-      ]);
-      if (vErr) return { error: vErr.message };
+      const bookIds = entries.map(r => r.book_id);
+      const { data: catBooks, error: bErr } = await supabase
+        .from('catalog').select('*').in('id', bookIds);
       if (bErr) return { error: bErr.message };
 
       const cfg = loadS3Config();
-      const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-      const { GetObjectCommand } = require('@aws-sdk/client-s3');
-      const s3c = cfg?.accessKeyId ? createS3Client(cfg) : null;
-
-      const result = await Promise.all(data.map(async entry => {
-        const version = versions.find(v => v.id === entry.version_id);
-        const cat     = catBooks.find(b => b.id === entry.book_id);
-        if (!version || !cat) return null;
-
-        let coverUrl = null;
-        if (cat.cover_s3_key && s3c) {
-          try {
-            coverUrl = await getSignedUrl(s3c,
-              new GetObjectCommand({ Bucket: cfg.bucket, Key: cat.cover_s3_key }),
-              { expiresIn: 7200 });
-          } catch {}
-        }
+      const result = await Promise.all(entries.map(async entry => {
+        const cat = catBooks.find(b => b.id === entry.book_id);
+        if (!cat) return null;
+        const coverUrl = await catalogCoverUrl(cat.cover_s3_key, cfg);
+        const chapters = (cat.chapters || []).map((ch, i) => ({
+          id: i, filename: ch.filename,
+          title: ch.title || `Chapter ${i + 1}`,
+          duration: ch.duration || 0,
+        }));
         return {
-          id:          version.id,
-          catalogId:   cat.id,
-          title:       cat.title,
-          author:      cat.author || '',
-          series:      cat.series || null,
-          seriesOrder: cat.series_order || null,
-          narrator:    version.narrator || '',
-          s3Prefix:    version.s3_prefix,
-          chapters:    (version.chapters || []).map((ch, i) => ({
-            id: i, filename: ch.filename,
-            title: ch.title || `Chapter ${i + 1}`,
-            duration: ch.duration || 0,
-          })),
-          chapterCount: version.chapter_count,
-          coverUrl, coverPath: null, folderPath: null,
-          isCloudOnly: true, isCatalog: true,
-          addedAt: entry.added_at,
-          playback: db.playback[version.id] || null,
+          id:           cat.id,
+          title:        cat.title,
+          author:       cat.author || '',
+          series:       cat.series || null,
+          seriesOrder:  cat.series_order || null,
+          s3Prefix:     cat.s3_prefix,
+          chapters,
+          chapterCount: cat.chapter_count || chapters.length,
+          coverUrl,     coverPath: null, folderPath: null,
+          isCloudOnly:  true, isCatalog: true,
+          addedAt:      entry.added_at,
+          playback:     db.playback[cat.id] || null,
         };
       }));
       return { books: result.filter(Boolean) };
     } catch (e) { return { error: e.message }; }
   });
 
-  ipcMain.handle('catalog:addToLibrary', async (_e, { bookId, versionId }) => {
+  ipcMain.handle('catalog:addToLibrary', async (_e, { bookId }) => {
     if (!supabase || !currentUser) return { error: 'Not logged in' };
     try {
       const { data: existing } = await supabase
         .from('user_library').select('id')
-        .eq('user_id', currentUser.id).eq('version_id', versionId).maybeSingle();
+        .eq('user_id', currentUser.id).eq('book_id', bookId).maybeSingle();
       if (existing) return { success: true, alreadyAdded: true };
       const { error } = await supabase.from('user_library').insert({
-        user_id: currentUser.id, book_id: bookId, version_id: versionId,
+        user_id: currentUser.id, book_id: bookId,
       });
       if (error) return { error: error.message };
       return { success: true };
     } catch (e) { return { error: e.message }; }
   });
 
-  ipcMain.handle('catalog:removeFromLibrary', async (_e, { versionId }) => {
+  ipcMain.handle('catalog:removeFromLibrary', async (_e, { bookId }) => {
     if (!supabase || !currentUser) return { error: 'Not logged in' };
     try {
       const { error } = await supabase.from('user_library')
-        .delete().eq('user_id', currentUser.id).eq('version_id', versionId);
+        .delete().eq('user_id', currentUser.id).eq('book_id', bookId);
       if (error) return { error: error.message };
-      delete db.playback[versionId];
-      delete db.bookmarks[versionId];
+      delete db.playback[bookId];
+      delete db.bookmarks[bookId];
       saveDb();
       return { success: true };
     } catch (e) { return { error: e.message }; }
@@ -1297,7 +1293,17 @@ function registerIPC() {
     } catch (e) { return { error: e.message }; }
   });
 
-  ipcMain.handle('catalog:upload', async (event, { folderPath, title, author, series, seriesOrder, narrator, existingBookId, coverPath }) => {
+  ipcMain.handle('catalog:upload', async (event, args) => {
+    // Receive as plain object to avoid any destructuring issues
+    const title       = String(args.title       || '').trim();
+    const author      = String(args.author      || '').trim() || null;
+    const series      = String(args.series      || '').trim() || null;
+    const seriesOrder = args.seriesOrder ? parseInt(String(args.seriesOrder), 10) : null;
+    const coverPath   = args.coverPath   || null;
+    const folderPath  = args.folderPath  || '';
+    console.log('[catalog:upload] received:', JSON.stringify({ title, author, series, seriesOrder, folderPath }));
+
+    if (!title) return { error: 'Title is required' };
     if (!supabase || !currentUser) return { error: 'Not logged in' };
     const cfg = loadS3Config();
     if (!cfg?.accessKeyId) return { error: 'S3 not configured' };
@@ -1313,36 +1319,19 @@ function registerIPC() {
 
     const { Upload } = require('@aws-sdk/lib-storage');
     const { PutObjectCommand } = require('@aws-sdk/client-s3');
-    const s3 = createS3Client(cfg);
-
-    // Step 1: find or create catalog entry
-    let catalogId = existingBookId || null;
-    if (!catalogId) {
-      const { data: newBook, error: bookErr } = await supabase
-        .from('catalog')
-        .insert({
-          title: title.trim(),
-          author: author?.trim() || null,
-          series: series?.trim() || null,
-          series_order: seriesOrder ? parseInt(seriesOrder, 10) : null,
-        })
-        .select('id').single();
-      if (bookErr) return { error: 'Failed to create catalog entry: ' + bookErr.message };
-      catalogId = newBook.id;
-    }
-
-    const versionId = crypto.randomUUID();
-    const s3Prefix  = `catalog/${versionId}/`;
+    const s3      = createS3Client(cfg);
+    const bookId  = crypto.randomUUID();
+    const s3Prefix = `catalog/${bookId}/`;
 
     event.sender.send('catalog:uploadProgress', { type: 'status', message: 'Starting upload…', progress: 0 });
 
-    // Step 2: upload audio files
+    // Upload audio files
     for (let i = 0; i < files.length; i++) {
       const filename = files[i];
       event.sender.send('catalog:uploadProgress', {
         type: 'file', message: `Uploading ${filename}…`,
-        fileIndex: i, fileCount: files.length, filePct: 0,
-        progress: Math.round(i / files.length * 100),
+        fileIndex: i, fileCount: files.length,
+        progress: Math.round(i / files.length * 88),
       });
       try {
         const uploader = new Upload({
@@ -1353,44 +1342,89 @@ function registerIPC() {
           const fp = ft ? Math.round(loaded / ft * 100) : 0;
           event.sender.send('catalog:uploadProgress', {
             type: 'file', message: `Uploading ${filename}…`,
-            fileIndex: i, fileCount: files.length, filePct: fp,
-            progress: Math.round((i + fp / 100) / files.length * 90),
+            fileIndex: i, fileCount: files.length,
+            progress: Math.round((i + fp / 100) / files.length * 88),
           });
         });
         await uploader.done();
       } catch (e) { return { error: `Failed to upload ${filename}: ${e.message}` }; }
     }
 
-    // Step 3: upload cover art
+    // Upload cover art
     let coverS3Key = null;
     if (coverPath && fs.existsSync(coverPath)) {
       const ext = path.extname(coverPath).slice(1).toLowerCase() || 'jpg';
       coverS3Key = `${s3Prefix}cover.${ext}`;
-      event.sender.send('catalog:uploadProgress', { type: 'status', message: 'Uploading cover art…', progress: 92 });
+      event.sender.send('catalog:uploadProgress', { type: 'status', message: 'Uploading cover…', progress: 92 });
       try {
         await s3.send(new PutObjectCommand({
           Bucket: cfg.bucket, Key: coverS3Key,
           Body: fs.readFileSync(coverPath),
           ContentType: ext === 'png' ? 'image/png' : 'image/jpeg',
         }));
-        await supabase.from('catalog').update({ cover_s3_key: coverS3Key }).eq('id', catalogId);
       } catch (e) { console.error('Cover upload failed:', e.message); coverS3Key = null; }
     }
 
-    // Step 4: create catalog_versions row
-    event.sender.send('catalog:uploadProgress', { type: 'status', message: 'Saving to catalog…', progress: 98 });
-    const { error: vErr } = await supabase.from('catalog_versions').insert({
-      id: versionId, book_id: catalogId,
-      narrator: narrator?.trim() || null,
-      s3_prefix: s3Prefix, chapter_count: files.length,
-      chapters: files.map((filename, i) => ({ filename, title: chapterTitle(filename), duration: 0 })),
+    // Insert catalog row
+    event.sender.send('catalog:uploadProgress', { type: 'status', message: 'Saving to marketplace…', progress: 97 });
+    const chapters = files.map((filename, i) => ({ filename, title: chapterTitle(filename), duration: 0 }));
+    const { error: insertErr } = await supabase.from('catalog').insert({
+      id: bookId, s3_prefix: s3Prefix,
+      title, author, series, series_order: seriesOrder,
+      chapter_count: files.length, chapters,
+      cover_s3_key: coverS3Key,
+      uploaded_by: currentUser?.id || null,
     });
-    if (vErr) return { error: 'Failed to create version: ' + vErr.message };
+    if (insertErr) return { error: 'Failed to save book: ' + insertErr.message };
 
     event.sender.send('catalog:uploadProgress', { type: 'done', message: 'Upload complete!', progress: 100 });
-    return { success: true, versionId, catalogId, chapterCount: files.length };
+    return { success: true, bookId, chapterCount: files.length };
   });
 
+  ipcMain.handle('catalog:editBook', async (_e, { bookId, title, author, series, seriesOrder }) => {
+    if (!supabase || !currentUser) return { error: 'Not authenticated' };
+    const updates = {};
+    if (title   !== undefined) updates.title        = String(title   || '').trim() || null;
+    if (author  !== undefined) updates.author       = String(author  || '').trim() || null;
+    if (series  !== undefined) updates.series       = String(series  || '').trim() || null;
+    if (seriesOrder !== undefined) updates.series_order = seriesOrder ? parseInt(String(seriesOrder), 10) : null;
+    if (!updates.title) return { error: 'Title is required' };
+    const { error } = await supabase.from('catalog').update(updates).eq('id', bookId);
+    if (error) return { error: error.message };
+    return { success: true };
+  });
+
+  ipcMain.handle('catalog:deleteBook', async (_e, { bookId }) => {
+    if (!supabase || !currentUser) return { error: 'Not authenticated' };
+    try {
+      // Fetch book to get s3_prefix
+      const { data: book, error: fetchErr } = await supabase.from('catalog').select('s3_prefix').eq('id', bookId).single();
+      if (fetchErr || !book) return { error: 'Book not found' };
+
+      // Delete all S3 objects under the prefix
+      const cfg = loadS3Config();
+      if (cfg?.accessKeyId && book.s3_prefix) {
+        const { ListObjectsV2Command, DeleteObjectsCommand } = require('@aws-sdk/client-s3');
+        const s3 = createS3Client(cfg);
+        const listed = await s3.send(new ListObjectsV2Command({ Bucket: cfg.bucket, Prefix: book.s3_prefix }));
+        if (listed.Contents?.length) {
+          await s3.send(new DeleteObjectsCommand({
+            Bucket: cfg.bucket,
+            Delete: { Objects: listed.Contents.map(o => ({ Key: o.Key })), Quiet: true },
+          }));
+        }
+      }
+
+      // Remove from user_library entries
+      await supabase.from('user_library').delete().eq('book_id', bookId);
+      // Delete catalog row
+      const { error: delErr } = await supabase.from('catalog').delete().eq('id', bookId);
+      if (delErr) return { error: delErr.message };
+      return { success: true };
+    } catch (e) {
+      return { error: e.message };
+    }
+  });
 
   ipcMain.handle('s3:getPresignedUrl', async (_e, { bookId, chapterIndex }) => {
     const s3Key =

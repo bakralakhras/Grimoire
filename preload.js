@@ -75,6 +75,8 @@ contextBridge.exposeInMainWorld('api', {
     removeFromLibrary: (data)  => ipcRenderer.invoke('catalog:removeFromLibrary', data),
     getPresignedUrl:   (data)  => ipcRenderer.invoke('catalog:getPresignedUrl', data),
     upload:            (data)  => ipcRenderer.invoke('catalog:upload', data),
+    editBook:          (data)  => ipcRenderer.invoke('catalog:editBook', data),
+    deleteBook:        (data)  => ipcRenderer.invoke('catalog:deleteBook', data),
     onUploadProgress:  (cb) => {
       ipcRenderer.removeAllListeners('catalog:uploadProgress');
       ipcRenderer.on('catalog:uploadProgress', (_e, data) => cb(data));

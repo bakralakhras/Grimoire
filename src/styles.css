@@ -109,6 +109,15 @@ body {
   border-right: 1px solid var(--border);
   overflow: hidden;
 }
+body.epub-hide-app-sidebar #sidebar {
+  width: 0;
+  opacity: 0;
+  border-right: none;
+}
+body.epub-hide-audio-panels #chapter-sidebar,
+body.epub-hide-audio-panels #bookmarks-sidebar {
+  display: none !important;
+}
 #sidebar-nav {
   padding: 12px 10px 8px;
   display: flex;
@@ -479,6 +488,27 @@ body {
 }
 #chapter-progress-row span { font-size: 11px; color: var(--text-muted); flex-shrink: 0; min-width: 36px; }
 #ch-current { text-align: right; }
+.now-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+#btn-epub-open {
+  min-width: 120px;
+}
+#btn-epub-open.epub-active {
+  color: var(--accent);
+  border-color: var(--border-active);
+  background: var(--accent-glow);
+}
+#btn-smart-sync {
+  min-width: 160px;
+}
+#btn-smart-sync[disabled] {
+  opacity: 0.65;
+  cursor: default;
+}
 
 /* ── Seek tracks (shared) ───────────────────────────────────────────────────── */
 .seek-track {
@@ -504,6 +534,20 @@ body {
   transition: transform 0.15s ease;
 }
 .seek-track:hover .seek-thumb { transform: translate(-50%, -50%) scale(1); }
+
+.seek-comment-dot {
+  position: absolute; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 1.5px solid rgba(0,0,0,0.4);
+  cursor: pointer;
+  padding: 0;
+  z-index: 5;
+  transition: transform 0.12s ease;
+}
+.seek-comment-dot:hover { transform: translate(-50%, -50%) scale(1.4); }
 
 /* ── Player bar ─────────────────────────────────────────────────────────────── */
 #player-bar {
@@ -562,6 +606,34 @@ body {
 .pb-seek-row { display: flex; align-items: center; gap: 10px; width: 100%; max-width: 480px; }
 .pb-seek-row span { font-size: 11px; color: var(--text-muted); flex-shrink: 0; min-width: 34px; }
 #pb-current { text-align: right; }
+
+/* ── Comment drop composer ───────────────────────────────────────────────────── */
+.comment-drop-popup {
+  position: fixed;
+  bottom: calc(var(--bar-h) + 14px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 400px;
+  background: rgba(12, 10, 20, 0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(124, 58, 237, 0.45);
+  border-radius: 10px;
+  padding: 10px 14px;
+  z-index: 300;
+  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(124, 58, 237, 0.08);
+}
+.comment-drop-input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 13px;
+  font-family: 'DM Sans', sans-serif;
+  caret-color: var(--accent);
+}
+.comment-drop-input::placeholder { color: var(--text-muted); }
 
 .pb-right { display: flex; align-items: center; gap: 10px; min-width: 200px; justify-content: flex-end; }
 .vol-wrap { display: flex; align-items: center; gap: 6px; color: var(--text-muted); }
@@ -1223,6 +1295,9 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
   right: auto; bottom: 12px;
   min-width: 220px;
 }
+body.epub-hide-app-sidebar .settings-popup {
+  left: 8px;
+}
 .settings-email {
   font-size: 12px; color: var(--text-dim);
   padding: 2px 0 4px; margin: 0;
@@ -1259,7 +1334,17 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
   flex-direction: column;
   background: #1a1625;
   overflow: hidden;
-  transition: opacity 0.2s;
+  transition: opacity 0.2s, top 0.2s, bottom 0.2s, left 0.2s;
+}
+body.epub-hide-app-sidebar .epub-reader { left: 0; }
+body.epub-focus-mode #titlebar,
+body.epub-focus-mode #player-bar {
+  display: none !important;
+}
+body.epub-focus-mode .epub-reader {
+  top: 0;
+  bottom: 0;
+  left: 0;
 }
 .epub-reader.hidden { display: none; }
 
@@ -1278,6 +1363,11 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
 }
 .epub-hdr-left  { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
 .epub-hdr-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.epub-hdr .icon-btn.active {
+  color: var(--accent);
+  border-color: rgba(124,58,237,0.35);
+  background: rgba(124,58,237,0.14);
+}
 .epub-hdr-meta  { display: flex; flex-direction: column; min-width: 0; }
 .epub-hdr-book  { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .epub-hdr-chapter { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1288,6 +1378,32 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
 }
 .epub-progress-fill {
   height: 100%; background: var(--accent); width: 0%; transition: width 0.4s;
+}
+body.epub-focus-mode .epub-hdr,
+body.epub-focus-mode .epub-progress-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-10px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+body.epub-focus-mode .epub-hdr {
+  top: 0;
+  z-index: 8;
+}
+body.epub-focus-mode .epub-progress-track {
+  top: 48px;
+  z-index: 7;
+}
+body.epub-focus-mode .epub-reader:hover .epub-hdr,
+body.epub-focus-mode .epub-reader:hover .epub-progress-track,
+body.epub-focus-mode .epub-reader:focus-within .epub-hdr,
+body.epub-focus-mode .epub-reader:focus-within .epub-progress-track {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 
 /* Body layout */
@@ -1312,6 +1428,14 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
 .epub-toc-list {
   flex: 1; overflow-y: auto; padding: 0 6px 16px;
 }
+.epub-toc-group-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 12px 10px 6px;
+}
 .epub-toc-item {
   display: block; width: 100%;
   padding: 7px 10px; border: none;
@@ -1323,6 +1447,10 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
 }
 .epub-toc-item:hover { background: rgba(124,58,237,0.1); color: var(--text); }
 .epub-toc-item.active { background: rgba(124,58,237,0.18); color: var(--accent); font-weight: 500; }
+.epub-toc-item-front,
+.epub-toc-item-back {
+  color: var(--text-muted);
+}
 
 /* Scroll area */
 .epub-scroll {
@@ -1348,6 +1476,25 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
   text-align: var(--epub-align, left);
   hyphens: var(--epub-hyphens, auto);
   user-select: text;
+}
+.epub-section {
+  position: relative;
+  padding-bottom: 22px;
+  margin-bottom: 18px;
+}
+.epub-section.active .epub-section-title {
+  color: var(--accent);
+}
+.epub-section-frontMatter .epub-section-title,
+.epub-section-backMatter .epub-section-title {
+  color: var(--text-dim);
+}
+.epub-section-title {
+  font-size: 24px;
+  font-weight: 400;
+  margin: 0 0 18px;
+  color: var(--text);
+  letter-spacing: -0.01em;
 }
 .epub-para {
   margin-bottom: var(--epub-para-spacing, 20px);
@@ -1483,6 +1630,67 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
 .toast.hidden { opacity: 0; pointer-events: none; }
 .toast.toast-error { border-color: rgba(220,50,50,0.45); color: #fca5a5; }
 .toast.toast-success { border-color: rgba(124,58,237,0.5); }
+
+.comment-toast-host {
+  position: fixed;
+  right: 20px;
+  bottom: calc(var(--bar-h) + 20px);
+  width: min(360px, calc(100vw - 24px));
+  z-index: 9001;
+  pointer-events: none;
+}
+.comment-toast {
+  background: linear-gradient(180deg, rgba(43, 29, 78, 0.94) 0%, rgba(20, 16, 35, 0.96) 100%);
+  border: 1px solid rgba(167, 139, 250, 0.32);
+  border-radius: 14px;
+  box-shadow: 0 18px 44px rgba(0,0,0,0.45), 0 0 0 1px rgba(124,58,237,0.08);
+  padding: 14px 16px 15px;
+  color: var(--text);
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.28s ease, transform 0.28s ease;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+.comment-toast.hidden {
+  opacity: 0;
+  transform: translateY(10px);
+}
+.comment-toast-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+  min-width: 0;
+}
+.comment-toast-user {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f1e9ff;
+}
+.comment-toast-context {
+  min-width: 0;
+  font-size: 11px;
+  color: rgba(222, 212, 255, 0.72);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.comment-toast-message {
+  font-size: 14px;
+  line-height: 1.45;
+  color: rgba(248, 244, 255, 0.96);
+  word-break: break-word;
+}
+
+@media (max-width: 720px) {
+  .comment-toast-host {
+    right: 12px;
+    left: 12px;
+    width: auto;
+    bottom: calc(var(--bar-h) + 12px);
+  }
+}
 
 /* ── Confirm dialog ──────────────────────────────────────────────────────────── */
 .confirm-modal-inner {

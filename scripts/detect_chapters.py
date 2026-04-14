@@ -232,6 +232,10 @@ def run_transcribe(args, model):
     """Full transcription mode: transcribe each chapter file and emit text."""
     chapters = json.loads(args.chapters_json)
     total = len(chapters)
+    transcript_parts = [None] * total
+    words_by_chapter = {}
+
+    emit({"type": "phase", "phase": "transcription", "event": "start", "total": total})
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for ch in chapters:
@@ -239,7 +243,14 @@ def run_transcribe(args, model):
             title    = ch["title"]
             filepath = ch["filepath"]
 
-            emit({"type": "progress", "chapterIndex": idx, "total": total, "chapterTitle": title})
+            emit({
+                "type": "progress",
+                "phase": "transcription",
+                "chapterIndex": idx,
+                "current": idx + 1,
+                "total": total,
+                "chapterTitle": title,
+            })
 
             # Convert to 16 kHz WAV — ensures compatibility with all input formats
             # (MP3, M4A, M4B, FLAC, OGG, …) and gives Whisper its preferred input.
@@ -260,8 +271,36 @@ def run_transcribe(args, model):
                 "text":         text,
                 "words":        words,
             })
+            transcript_parts[idx] = f"=== Chapter {idx + 1}: {title} ===\n\n{text}"
+            words_by_chapter[str(idx)] = words
 
-    emit({"type": "result"})
+    emit({"type": "phase", "phase": "transcription", "event": "complete", "total": total})
+    emit({
+        "type": "transcript",
+        "text": "\n\n---\n\n".join(part for part in transcript_parts if part),
+        "wordsByChapter": words_by_chapter,
+    })
+    emit({"type": "phase", "phase": "alignment", "event": "start", "mode": "stub"})
+    emit({
+        "type": "progress",
+        "phase": "alignment",
+        "current": 1,
+        "total": 1,
+        "message": "Alignment stub complete",
+        "stub": True,
+    })
+    emit({
+        "type": "alignment",
+        "data": {
+            "status": "stub",
+            "stub": True,
+            "complete": False,
+            "version": "alignment-stub-v1",
+            "segments": [],
+        },
+    })
+    emit({"type": "phase", "phase": "alignment", "event": "complete", "stub": True, "complete": False})
+    emit({"type": "result", "phase": "smart-sync"})
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

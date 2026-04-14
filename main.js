@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -17,6 +17,11 @@ let offlineQueue = [];
 let mainWindow;
 let transcribeWindow;
 let db;
+const epubMemoryCache = new Map();
+const smartSyncJobs = new Map();
+const SMART_SYNC_MODEL = 'faster-whisper:base';
+const SMART_SYNC_ALGORITHM_VERSION = 'smart-sync-v1';
+const SMART_SYNC_ALIGNMENT_VERSION = 'alignment-stub-v1';
 
 // ── Data persistence (JSON) ─────────────────────────────────────────────────
 
@@ -40,6 +45,286 @@ function saveDb() {
   catch (e) { console.error('Save error:', e); }
 }
 
+function ensureDir(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function managedLibraryRootDir() {
+  return path.join(app.getPath('userData'), 'library');
+}
+
+function managedCatalogBookDir(bookId) {
+  return path.join(managedLibraryRootDir(), String(bookId));
+}
+
+function isPathInside(root, target) {
+  try {
+    const rel = path.relative(path.resolve(root), path.resolve(target));
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  } catch {
+    return false;
+  }
+}
+
+function isManagedCatalogBook(book, expectedBookId = null) {
+  if (!book?.managedFolder) return false;
+  const catalogId = String(book.sourceCatalogId || book.catalogId || book.id || '');
+  if (!catalogId) return false;
+  if (expectedBookId != null && catalogId !== String(expectedBookId)) return false;
+  return isPathInside(managedLibraryRootDir(), book.folderPath || managedCatalogBookDir(catalogId));
+}
+
+function cleanupManagedCatalogBookFiles(bookId, book = db?.books?.[bookId]) {
+  const managedDir = managedCatalogBookDir(bookId);
+  if (fs.existsSync(managedDir) && isPathInside(managedLibraryRootDir(), managedDir)) {
+    try { fs.rmSync(managedDir, { recursive: true, force: true }); } catch {}
+  }
+
+  const epubPath = path.join(app.getPath('userData'), 'epubs', `${bookId}.epub`);
+  const epubCache = path.join(app.getPath('userData'), 'epub-cache', `${bookId}.json`);
+  try { if (fs.existsSync(epubPath)) fs.unlinkSync(epubPath); } catch {}
+  try { if (fs.existsSync(epubCache)) fs.unlinkSync(epubCache); } catch {}
+}
+
+function deleteBookRecord(bookId, { cleanupManaged = false } = {}) {
+  const book = db.books[bookId];
+  if (cleanupManaged) cleanupManagedCatalogBookFiles(bookId, book);
+  delete db.books[bookId];
+  delete db.playback[bookId];
+  delete db.bookmarks[bookId];
+  saveDb();
+  return true;
+}
+
+function safeReadJson(file, fallback = null) {
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function safeReadText(file, fallback = null) {
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return fallback;
+  }
+}
+
+function safeWriteJson(file, value) {
+  fs.writeFileSync(file, JSON.stringify(value, null, 2), 'utf8');
+}
+
+function transcriptRootDir() {
+  return path.join(app.getPath('userData'), 'transcripts');
+}
+
+function transcriptCachePaths(bookId) {
+  const dir = path.join(transcriptRootDir(), String(bookId));
+  return {
+    dir,
+    transcript: path.join(dir, 'transcript.txt'),
+    words: path.join(dir, 'words.json'),
+    alignment: path.join(dir, 'alignment.json'),
+    meta: path.join(dir, 'meta.json'),
+    temp: path.join(dir, '.tmp'),
+  };
+}
+
+function legacyTranscriptPaths(bookId) {
+  const root = transcriptRootDir();
+  return {
+    transcript: path.join(root, `${bookId}_full.txt`),
+    words: path.join(root, `${bookId}_words.json`),
+  };
+}
+
+function statSignature(file) {
+  try {
+    const st = fs.statSync(file);
+    return {
+      path: path.resolve(file),
+      size: st.size,
+      mtimeMs: Math.round(st.mtimeMs),
+    };
+  } catch {
+    return {
+      path: path.resolve(file),
+      missing: true,
+    };
+  }
+}
+
+function audioInvalidationSignature(book) {
+  const hash = crypto.createHash('sha1');
+  hash.update(JSON.stringify({
+    bookId: book?.id || null,
+    chapterCount: book?.chapterCount || book?.chapters?.length || 0,
+    chapters: (book?.chapters || []).map((ch, i) => ({
+      index: i,
+      title: ch?.title || '',
+      file: statSignature(ch?.filepath || ''),
+    })),
+  }));
+  return hash.digest('hex');
+}
+
+function epubInvalidationSignature(book) {
+  if (!book?.epubPath && !book?.epubKey) return null;
+  const hash = crypto.createHash('sha1');
+  hash.update(JSON.stringify({
+    epubPath: book?.epubPath ? statSignature(book.epubPath) : null,
+    epubKey: book?.epubKey || null,
+  }));
+  return hash.digest('hex');
+}
+
+function buildSmartSyncMeta(book, overrides = {}) {
+  const now = new Date().toISOString();
+  return {
+    bookId: book.id,
+    audioSignature: audioInvalidationSignature(book),
+    epubSignature: epubInvalidationSignature(book),
+    model: SMART_SYNC_MODEL,
+    modelName: SMART_SYNC_MODEL,
+    algorithmVersion: SMART_SYNC_ALGORITHM_VERSION,
+    createdAt: overrides.createdAt || now,
+    updatedAt: overrides.updatedAt || now,
+    transcriptComplete: false,
+    alignmentComplete: false,
+    alignmentStatus: 'pending',
+    ...overrides,
+  };
+}
+
+function moveIfPossible(src, dest) {
+  if (!fs.existsSync(src)) return false;
+  if (fs.existsSync(dest)) return true;
+  try {
+    fs.renameSync(src, dest);
+    return true;
+  } catch {
+    try {
+      fs.copyFileSync(src, dest);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function migrateLegacyTranscriptCache(book) {
+  const bookId = book?.id || book;
+  const paths = transcriptCachePaths(bookId);
+  const legacy = legacyTranscriptPaths(bookId);
+  const legacyExists = fs.existsSync(legacy.transcript) || fs.existsSync(legacy.words);
+  if (!legacyExists) return false;
+
+  ensureDir(transcriptRootDir());
+  ensureDir(paths.dir);
+
+  const movedTranscript = moveIfPossible(legacy.transcript, paths.transcript);
+  const movedWords = moveIfPossible(legacy.words, paths.words);
+  const transcriptExists = fs.existsSync(paths.transcript);
+  const wordsExists = fs.existsSync(paths.words);
+  if (!transcriptExists && !wordsExists) return false;
+
+  if (!fs.existsSync(paths.alignment)) {
+    safeWriteJson(paths.alignment, {
+      status: 'stub',
+      version: SMART_SYNC_ALIGNMENT_VERSION,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      segments: [],
+    });
+  }
+
+  const meta = safeReadJson(paths.meta) || buildSmartSyncMeta(
+    typeof book === 'object' ? book : { id: bookId, chapters: [] },
+    {
+      transcriptComplete: transcriptExists || wordsExists,
+      alignmentComplete: false,
+      alignmentStatus: 'stub',
+    }
+  );
+  safeWriteJson(paths.meta, meta);
+
+  if (movedTranscript && fs.existsSync(legacy.transcript)) {
+    try { fs.unlinkSync(legacy.transcript); } catch {}
+  }
+  if (movedWords && fs.existsSync(legacy.words)) {
+    try { fs.unlinkSync(legacy.words); } catch {}
+  }
+  return true;
+}
+
+function readTranscriptCache(book) {
+  migrateLegacyTranscriptCache(book);
+  const paths = transcriptCachePaths(book.id);
+  return {
+    paths,
+    transcript: safeReadText(paths.transcript),
+    words: safeReadJson(paths.words),
+    alignment: safeReadJson(paths.alignment),
+    meta: safeReadJson(paths.meta),
+  };
+}
+
+function isSmartSyncCacheValid(book, cache) {
+  const meta = cache?.meta;
+  if (!meta) return false;
+  if (!meta.transcriptComplete) return false;
+  if (!cache.transcript && !cache.words) return false;
+  if ((meta.bookId || '') !== String(book.id)) return false;
+  if ((meta.audioSignature || '') !== audioInvalidationSignature(book)) return false;
+  if ((meta.epubSignature || null) !== epubInvalidationSignature(book)) return false;
+  if ((meta.modelName || '') !== SMART_SYNC_MODEL) return false;
+  if ((meta.algorithmVersion || '') !== SMART_SYNC_ALGORITHM_VERSION) return false;
+  return true;
+}
+
+function publicJobState(job) {
+  if (!job) return null;
+  return {
+    bookId: job.bookId,
+    status: job.status,
+    stage: job.stage,
+    progress: job.progress,
+    startedAt: job.startedAt,
+    updatedAt: job.updatedAt,
+    error: job.error || null,
+    pid: job.pid || null,
+    cacheHit: !!job.cacheHit,
+  };
+}
+
+function sendTranscribeProgress(payload) {
+  mainWindow?.webContents.send('transcribe:progress', {
+    timestamp: new Date().toISOString(),
+    ...payload,
+  });
+}
+
+function updateSmartSyncJob(job, patch = {}) {
+  Object.assign(job, patch, { updatedAt: new Date().toISOString() });
+  smartSyncJobs.set(job.bookId, job);
+  if (patch.event) {
+    sendTranscribeProgress({
+      bookId: job.bookId,
+      event: patch.event,
+      status: job.status,
+      stage: job.stage,
+      progress: job.progress || null,
+      error: job.error || null,
+      payload: patch.payload || null,
+    });
+  }
+  return job;
+}
+
 // ── Supabase helpers ──────────────────────────────────────────────────────────
 
 function initSupabase() {
@@ -52,6 +337,14 @@ function initSupabase() {
 function sessionFilePath()   { return path.join(app.getPath('userData'), 'auth-session.json'); }
 function authStateFilePath() { return path.join(app.getPath('userData'), 'auth-state.json'); }
 function queueFilePath()     { return path.join(app.getPath('userData'), 'sync-queue.json'); }
+
+const COMMENT_TEXT_COLUMNS = ['comment_text', 'text', 'content', 'body', 'comment'];
+const REPLY_TEXT_COLUMNS = ['reply_text', 'text', 'content', 'body', 'reply'];
+const COMMENT_SELECTION_COLUMNS = [
+  { text: 'selected_text', chapter: 'epub_chapter_index', paragraph: 'epub_paragraph_index' },
+  { text: 'epub_selected_text', chapter: 'epub_chapter_index', paragraph: 'epub_paragraph_index' },
+  { text: 'selection_text', chapter: 'selection_chapter_index', paragraph: 'selection_paragraph_index' },
+];
 
 function saveSession(session) {
   try {
@@ -73,10 +366,208 @@ async function loadSession() {
     const { access_token, refresh_token } = JSON.parse(fs.readFileSync(sessionFilePath(), 'utf8'));
     const { data, error } = await supabase.auth.setSession({ access_token, refresh_token });
     if (error || !data?.session) { clearSession(); return null; }
-    currentUser = data.session.user;
+    currentUser = await hydrateAuthUser(data.session.user);
     saveSession(data.session);
     return data.session;
   } catch { clearSession(); return null; }
+}
+
+function normalizeUsername(value) {
+  return String(value || '').trim();
+}
+
+function validateUsername(value) {
+  const username = normalizeUsername(value);
+  if (!username) return { error: 'Username is required.' };
+  if (username.length < 3) return { error: 'Username must be at least 3 characters.' };
+  if (username.length > 32) return { error: 'Username must be 32 characters or fewer.' };
+  if (!/^[A-Za-z0-9._-]+$/.test(username)) {
+    return { error: 'Username can only use letters, numbers, dots, underscores, and hyphens.' };
+  }
+  return { value: username };
+}
+
+function usernameFromEmail(email) {
+  const local = String(email || 'user').split('@')[0] || 'user';
+  const sanitized = local.replace(/[^A-Za-z0-9._-]+/g, '').slice(0, 24);
+  return sanitized || 'user';
+}
+
+function internalEmailForUsername(username) {
+  return `${String(username || '').toLowerCase()}@grimoire.local`;
+}
+
+function publicUser(user = currentUser) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    email: user.email,
+    username: user.username || usernameFromEmail(user.email),
+  };
+}
+
+async function getUserProfileByUserId(userId) {
+  if (!supabase || !userId) return null;
+  const { data, error } = await supabase
+    .from('user_profiles')
+    .select('id, email, username')
+    .eq('id', userId)
+    .limit(1);
+  if (error) throw new Error(error.message);
+  return data?.[0] || null;
+}
+
+async function getUserProfileByUsername(username) {
+  if (!supabase || !username) return null;
+  const { value, error: usernameError } = validateUsername(username);
+  if (usernameError) return null;
+
+  const direct = await supabase
+    .from('user_profiles')
+    .select('id, email, username')
+    .ilike('username', value)
+    .limit(1);
+  if (direct.error) throw new Error(direct.error.message);
+  if (direct.data?.[0]) return direct.data[0];
+
+  const legacy = await supabase
+    .from('user_profiles')
+    .select('id, email, username')
+    .ilike('email', `${value}@%`)
+    .limit(1);
+  if (legacy.error) throw new Error(legacy.error.message);
+  return legacy.data?.[0] || null;
+}
+
+async function ensureUniqueUsername(baseUsername, excludeUserId = null) {
+  const seed = normalizeUsername(baseUsername).replace(/[^A-Za-z0-9._-]+/g, '') || 'user';
+  const base = seed.slice(0, 24);
+  for (let i = 0; i < 100; i++) {
+    const suffix = i === 0 ? '' : String(i + 1);
+    const candidate = `${base}${suffix}`.slice(0, 32);
+    const existing = await getUserProfileByUsername(candidate);
+    if (!existing || existing.id === excludeUserId) return candidate;
+  }
+  return `user${Date.now()}`.slice(0, 32);
+}
+
+async function upsertUserProfile({ userId, email, username }) {
+  if (!supabase) throw new Error('Sync unavailable');
+  const { data, error } = await supabase
+    .from('user_profiles')
+    .upsert({
+      id: userId,
+      email,
+      username,
+    }, { onConflict: 'id' })
+    .select('id, email, username')
+    .single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+async function hydrateAuthUser(user, preferredUsername = null) {
+  if (!user) return null;
+
+  let profile = null;
+  try {
+    profile = await getUserProfileByUserId(user.id);
+  } catch (error) {
+    console.warn('Profile lookup failed:', error.message);
+  }
+
+  let username = profile?.username || preferredUsername || null;
+  if (!profile) {
+    try {
+      profile = await upsertUserProfile({
+        userId: user.id,
+        email: user.email,
+        username: preferredUsername || null,
+      });
+      username = profile?.username || preferredUsername || null;
+    } catch (error) {
+      console.warn('Profile upsert failed:', error.message);
+    }
+  }
+
+  currentUser = {
+    ...user,
+    username: username || usernameFromEmail(user.email),
+  };
+  return currentUser;
+}
+
+function firstPresent(row, keys) {
+  for (const key of keys) {
+    if (row?.[key] != null && row[key] !== '') return row[key];
+  }
+  return null;
+}
+
+function normalizeOptionalNumber(value) {
+  if (value == null || value === '') return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+async function fetchProfilesByIds(userIds) {
+  const ids = Array.from(new Set((userIds || []).filter(Boolean)));
+  if (!supabase || !ids.length) return new Map();
+  const { data, error } = await supabase
+    .from('user_profiles')
+    .select('id, email, username')
+    .in('id', ids);
+  if (error) throw new Error(error.message);
+  return new Map((data || []).map(profile => [profile.id, profile]));
+}
+
+function normalizeReplyRow(row, profiles) {
+  const userId = row?.user_id || null;
+  const profile = profiles.get(userId) || null;
+  return {
+    id: row.id,
+    commentId: row.comment_id,
+    userId,
+    username: profile?.username || usernameFromEmail(profile?.email),
+    text: String(firstPresent(row, REPLY_TEXT_COLUMNS) || ''),
+    createdAt: row.created_at || new Date().toISOString(),
+  };
+}
+
+function normalizeCommentRow(row, profiles, repliesByComment) {
+  const userId = row?.user_id || null;
+  const profile = profiles.get(userId) || null;
+  const selection = COMMENT_SELECTION_COLUMNS.find(columns => row?.[columns.text] != null) || null;
+  return {
+    id: row.id,
+    bookId: row.book_id,
+    chapterIndex: normalizeOptionalNumber(row.chapter_index) ?? 0,
+    audioTimestampSeconds: normalizeOptionalNumber(row.audio_timestamp_seconds) ?? 0,
+    userId,
+    username: profile?.username || row?.username || usernameFromEmail(profile?.email) || 'Unknown',
+    text: String(firstPresent(row, COMMENT_TEXT_COLUMNS) || ''),
+    createdAt: row.created_at || new Date().toISOString(),
+    selectedText: selection ? row[selection.text] : null,
+    epubChapterIndex: selection ? normalizeOptionalNumber(row[selection.chapter]) : null,
+    epubParagraphIndex: selection ? normalizeOptionalNumber(row[selection.paragraph]) : null,
+    replies: repliesByComment.get(row.id) || [],
+  };
+}
+
+function isUnknownColumnError(error) {
+  const message = String(error?.message || '');
+  return /column|schema cache|does not exist|Could not find/.test(message);
+}
+
+async function insertWithVariants(table, variants) {
+  let lastError = null;
+  for (const row of variants) {
+    const { data, error } = await supabase.from(table).insert(row).select('*').single();
+    if (!error) return data;
+    lastError = error;
+    if (!isUnknownColumnError(error)) break;
+  }
+  throw new Error(lastError?.message || `Failed to insert into ${table}.`);
 }
 
 function isAuthSkipped() {
@@ -297,12 +788,19 @@ function downloadToFile(url, dest) {
     const https = require('https');
     const http  = require('http');
     const mod   = url.startsWith('https') ? https : http;
+    ensureDir(path.dirname(dest));
     const file  = fs.createWriteStream(dest);
     mod.get(url, res => {
       if (res.statusCode === 301 || res.statusCode === 302) {
         file.close();
         try { fs.unlinkSync(dest); } catch {}
         downloadToFile(res.headers.location, dest).then(resolve).catch(reject);
+        return;
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        try { fs.unlinkSync(dest); } catch {}
+        reject(new Error(`Download failed with status ${res.statusCode}`));
         return;
       }
       res.pipe(file);
@@ -397,6 +895,417 @@ async function parseEpubFile(epubPath) {
   }));
 
   return results.filter(Boolean);
+}
+
+function chunkArray(items, parts) {
+  if (!Array.isArray(items) || !items.length || parts <= 0) return [];
+  const out = [];
+  for (let i = 0; i < parts; i++) {
+    const start = Math.floor(i * items.length / parts);
+    const end = Math.floor((i + 1) * items.length / parts);
+    out.push(items.slice(start, end));
+  }
+  return out;
+}
+
+function chunkParagraphs(paragraphs, parts) {
+  return chunkArray(paragraphs.filter(Boolean), Math.max(1, parts))
+    .filter(group => group.length > 0);
+}
+
+function normalizeChapterMatchText(value, bookTitle = '') {
+  let text = String(value || '').toLowerCase().replace(/&[^;\s]+;/g, ' ');
+  text = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  if (bookTitle) {
+    const normBook = String(bookTitle).toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normText = text.replace(/[^a-z0-9]/g, '');
+    if (normBook && normText.startsWith(normBook)) {
+      let matched = 0;
+      let i = 0;
+      while (i < text.length && matched < normBook.length) {
+        if (/[a-z0-9]/i.test(text[i])) matched++;
+        i++;
+      }
+      while (i < text.length && /[\s\-_:.,]/.test(text[i])) i++;
+      text = text.slice(i).trim();
+    }
+  }
+  return text.replace(/[^a-z0-9]+/g, '');
+}
+
+function romanToInt(value) {
+  const roman = String(value || '').toUpperCase();
+  if (!/^[IVXLCDM]+$/.test(roman)) return null;
+  const map = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
+  let total = 0;
+  let prev = 0;
+  for (let i = roman.length - 1; i >= 0; i--) {
+    const cur = map[roman[i]] || 0;
+    total += cur < prev ? -cur : cur;
+    prev = cur;
+  }
+  return total || null;
+}
+
+function wordToInt(value) {
+  const words = {
+    one: 1, two: 2, three: 3, four: 4, five: 5,
+    six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+    eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15,
+    sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20,
+    twentyone: 21, twentytwo: 22, twentythree: 23, twentyfour: 24, twentyfive: 25,
+    twentysix: 26, twentyseven: 27, twentyeight: 28, twentynine: 29, thirty: 30,
+  };
+  const key = String(value || '').toLowerCase().replace(/[^a-z]/g, '');
+  return words[key] || null;
+}
+
+function extractChapterNumber(value) {
+  if (!value) return null;
+  const arabic = String(value).match(/\d{1,4}/);
+  if (arabic) return parseInt(arabic[0], 10);
+  const roman = String(value).match(/\b([ivxlcdm]+)\b/i);
+  if (roman) return romanToInt(roman[1]);
+  const word = String(value).match(/\b([a-z]+(?:[\s-][a-z]+)?)\b/i);
+  if (word) return wordToInt(word[1]);
+  return null;
+}
+
+function buildChapterMatchMeta(title = '', paragraphs = [], bookTitle = '') {
+  const textCandidates = [
+    String(title || '').trim(),
+    String(paragraphs?.[0] || '').trim(),
+    String(paragraphs?.find(p => /\b(?:prologue|epilogue|chapter|part|ch\.)\b/i.test(p)) || '').trim(),
+  ].filter(Boolean);
+  const first = textCandidates[0] || '';
+  const joined = textCandidates.join(' ');
+  const lower = joined.toLowerCase();
+  const key = normalizeChapterMatchText(first || joined, bookTitle);
+
+  if (/\bprologue\b/i.test(lower)) {
+    return { kind: 'prologue', number: 0, key: key || 'prologue' };
+  }
+  if (/\bepilogue\b/i.test(lower)) {
+    return { kind: 'epilogue', number: Number.MAX_SAFE_INTEGER, key: key || 'epilogue' };
+  }
+
+  const chapterLike = joined.match(/\b(chapter|ch\.|part)\s+([a-z0-9ivxlcdm-]+)/i);
+  if (chapterLike) {
+    const number = extractChapterNumber(chapterLike[2]);
+    if (number != null) {
+      return { kind: chapterLike[1].toLowerCase().startsWith('part') ? 'part' : 'numbered', number, key: `chapter${number}` };
+    }
+  }
+
+  const bareNumber = extractChapterNumber(first);
+  if (bareNumber != null && /^(?:\d+|[ivxlcdm]+|[a-z\s-]+)$/i.test(first)) {
+    return { kind: 'numbered', number: bareNumber, key: `chapter${bareNumber}` };
+  }
+
+  return { kind: 'named', number: null, key };
+}
+
+function scoreChapterMatch(sectionMeta, audioMeta, audioIndex) {
+  if (!sectionMeta || !audioMeta) return 0;
+  let score = 0;
+
+  if (sectionMeta.kind === 'prologue' && audioMeta.kind === 'prologue') score += 14;
+  if (sectionMeta.kind === 'epilogue' && audioMeta.kind === 'epilogue') score += 14;
+  if (sectionMeta.number != null && audioMeta.number != null && sectionMeta.number === audioMeta.number) score += 14;
+
+  if (sectionMeta.key && audioMeta.key) {
+    if (sectionMeta.key === audioMeta.key) score += 10;
+    else if (sectionMeta.key.includes(audioMeta.key) || audioMeta.key.includes(sectionMeta.key)) score += 6;
+  }
+
+  if (!score && sectionMeta.kind === 'numbered' && sectionMeta.number === audioIndex + 1) score += 8;
+  return score;
+}
+
+function epubSectionStats(section, bookTitle = '') {
+  const title = String(section?.title || '').trim();
+  const paragraphs = Array.isArray(section?.paragraphs) ? section.paragraphs : [];
+  const text = paragraphs.join(' ').replace(/\s+/g, ' ').trim();
+  const words = text ? text.split(/\s+/).length : 0;
+  const lower = text.toLowerCase();
+  const titleLower = title.toLowerCase();
+  const heading = `${title} ${paragraphs[0] || ''}`.toLowerCase();
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const metadataPatterns = [
+    /all rights reserved/g,
+    /\bcopyright\b/g,
+    /\bisbn\b/g,
+    /\bpublisher\b/g,
+    /\bpublished by\b/g,
+    /\blibrary of congress\b/g,
+    /\bcover design\b/g,
+    /\btext copyright\b/g,
+    /\bebook\b/g,
+    /\btable of contents\b/g,
+    /\bcontents\b/g,
+    /\bdedication\b/g,
+    /\backnowledg(?:e)?ments?\b/g,
+    /\bmap\b/g,
+    /\billustration\b/g,
+    /\bpreview\b/g,
+    /\bexcerpt\b/g,
+    /\bbonus\b/g,
+    /\balso by\b/g,
+    /\bpraise for\b/g,
+    /\babout the author\b/g,
+  ];
+  const metadataHits = metadataPatterns.reduce((sum, re) => sum + ((lower.match(re) || []).length), 0);
+  const sentenceHits = (text.match(/[.!?][\s"']+[A-Z]/g) || []).length;
+  const dialogueHits = (text.match(/["“”]/g) || []).length;
+  const shortParas = paragraphs.filter(p => p.trim().split(/\s+/).length <= 8).length;
+  const titleRepeat = bookTitle && norm(title).startsWith(norm(bookTitle));
+  const titleOnly = bookTitle && norm(text.slice(0, Math.min(text.length, 160))) === norm(bookTitle);
+
+  let nonStoryScore = metadataHits * 3;
+  if (titleRepeat) nonStoryScore += 3;
+  if (titleOnly) nonStoryScore += 4;
+  if (words < 40) nonStoryScore += 2;
+  if (words < 18) nonStoryScore += 2;
+  if (paragraphs.length && shortParas / paragraphs.length > 0.7) nonStoryScore += 2;
+  if (/^(contents?|copyright|dedication|acknowledg(?:e)?ments?|map|preview|excerpt|bonus)/i.test(title)) nonStoryScore += 4;
+
+  let storyScore = 0;
+  if (words >= 120) storyScore += 3;
+  if (sentenceHits >= 3) storyScore += 2;
+  if (dialogueHits >= 2) storyScore += 1;
+  if (paragraphs.length >= 3) storyScore += 1;
+  if (/^chapter\b|^prologue\b|^epilogue\b|^part\b/i.test(titleLower)) storyScore += 2;
+
+  return {
+    title,
+    paragraphs,
+    words,
+    metadataHits,
+    nonStoryScore,
+    storyScore,
+    likelyNonStory: nonStoryScore >= 5 && storyScore <= 2,
+    likelyStory: storyScore >= 3 && nonStoryScore <= 4,
+    marker: buildChapterMatchMeta(title, paragraphs, bookTitle),
+    text,
+  };
+}
+
+function detectStoryBounds(sections, bookTitle = '', audioChapters = []) {
+  if (!sections.length) return { start: 0, end: -1, stats: [] };
+  const stats = sections.map(section => epubSectionStats(section, bookTitle));
+
+  let start = 0;
+  const firstAudioMeta = audioChapters.length
+    ? buildChapterMatchMeta(audioChapters[0]?.title || `Chapter 1`, [], bookTitle)
+    : null;
+  if (firstAudioMeta) {
+    for (let i = 0; i < Math.min(stats.length, 20); i++) {
+      const here = stats[i];
+      const matchScore = scoreChapterMatch(here.marker, firstAudioMeta, 0);
+      const looksStoryish = here.likelyStory || here.storyScore >= here.nonStoryScore || here.words >= 80;
+      if (matchScore >= 10 || (matchScore >= 6 && looksStoryish)) {
+        start = i;
+        break;
+      }
+    }
+  }
+
+  for (let i = 0; i < stats.length; i++) {
+    if (i < start) continue;
+    const here = stats[i];
+    const next = stats[i + 1];
+    const looksLikeStart = here.likelyStory || (
+      here.storyScore >= here.nonStoryScore &&
+      here.words >= 80 &&
+      !(here.metadataHits >= 2 && here.words < 120)
+    );
+    const windowSupport = !next || next.likelyStory || next.storyScore >= next.nonStoryScore;
+    if (looksLikeStart && windowSupport) {
+      start = i;
+      break;
+    }
+  }
+
+  let end = stats.length - 1;
+  for (let i = stats.length - 1; i >= start; i--) {
+    const here = stats[i];
+    const prev = stats[i - 1];
+    const looksLikeTail = here.likelyNonStory && (
+      i === stats.length - 1 ||
+      (prev && prev.likelyNonStory)
+    );
+    if (looksLikeTail) {
+      end = i - 1;
+      continue;
+    }
+    break;
+  }
+
+  if (end < start) end = stats.length - 1;
+  return { start, end, stats };
+}
+
+function buildSectionStartIndexes(totalSections, desired, anchors) {
+  const starts = Array(desired).fill(0);
+  const sorted = anchors
+    .filter(a => a && a.audioIndex >= 0 && a.audioIndex < desired && a.sectionIndex >= 0 && a.sectionIndex < totalSections)
+    .sort((a, b) => a.audioIndex - b.audioIndex || a.sectionIndex - b.sectionIndex)
+    .filter((anchor, i, arr) => i === 0 || (anchor.audioIndex !== arr[i - 1].audioIndex && anchor.sectionIndex > arr[i - 1].sectionIndex));
+
+  if (!sorted.length || sorted[0].audioIndex !== 0) {
+    sorted.unshift({ audioIndex: 0, sectionIndex: 0 });
+  }
+
+  const last = sorted[sorted.length - 1];
+  if (last.audioIndex !== desired - 1) {
+    sorted.push({ audioIndex: desired - 1, sectionIndex: Math.max(0, totalSections - 1) });
+  }
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const left = sorted[i];
+    const right = sorted[i + 1];
+    const audioSpan = Math.max(1, right.audioIndex - left.audioIndex);
+    const sectionSpan = Math.max(0, right.sectionIndex - left.sectionIndex);
+    for (let step = 0; step <= audioSpan; step++) {
+      const audioIndex = left.audioIndex + step;
+      const offset = Math.floor(sectionSpan * step / audioSpan);
+      starts[audioIndex] = Math.min(totalSections - 1, left.sectionIndex + offset);
+    }
+  }
+
+  for (let i = 1; i < starts.length; i++) {
+    starts[i] = Math.max(starts[i], starts[i - 1] + 1);
+  }
+  for (let i = starts.length - 2; i >= 0; i--) {
+    starts[i] = Math.min(starts[i], starts[i + 1] - 1);
+  }
+
+  starts[0] = 0;
+  for (let i = 1; i < starts.length; i++) {
+    starts[i] = Math.max(i, Math.min(starts[i], totalSections - (desired - i)));
+  }
+  return starts;
+}
+
+function groupStorySectionsByAudioChapters(storySections, audioChapters) {
+  const desired = Math.max(1, audioChapters.length);
+  if (!storySections.length) return [];
+  if (storySections.length === desired) {
+    return storySections.map((ch, i) => ({
+      title: audioChapters[i]?.title || ch.title || `Chapter ${i + 1}`,
+      paragraphs: ch.paragraphs,
+      sourceCount: 1,
+    }));
+  }
+  if (storySections.length < desired) return null;
+
+  const audioMeta = audioChapters.map((ch, i) => buildChapterMatchMeta(ch?.title || `Chapter ${i + 1}`));
+  const anchors = [];
+
+  for (let audioIndex = 0; audioIndex < desired; audioIndex++) {
+    let best = null;
+    for (let sectionIndex = 0; sectionIndex < storySections.length; sectionIndex++) {
+      const section = storySections[sectionIndex];
+      const meta = buildChapterMatchMeta(section.title, section.paragraphs);
+      const score = scoreChapterMatch(meta, audioMeta[audioIndex], audioIndex);
+      if (score >= 8 && (!best || score > best.score || (score === best.score && sectionIndex < best.sectionIndex))) {
+        best = { audioIndex, sectionIndex, score };
+      }
+    }
+    if (best) anchors.push(best);
+  }
+
+  const usableAnchors = [];
+  let lastSectionIndex = -1;
+  for (const anchor of anchors.sort((a, b) => a.audioIndex - b.audioIndex || a.sectionIndex - b.sectionIndex)) {
+    if (anchor.sectionIndex <= lastSectionIndex) continue;
+    usableAnchors.push(anchor);
+    lastSectionIndex = anchor.sectionIndex;
+  }
+
+  if (!usableAnchors.length) return null;
+
+  const starts = buildSectionStartIndexes(storySections.length, desired, usableAnchors);
+  return starts.map((start, i) => {
+    const end = i + 1 < starts.length ? starts[i + 1] : storySections.length;
+    const group = storySections.slice(start, Math.max(start + 1, end));
+    return {
+      title: audioChapters[i]?.title || group.find(ch => ch.title)?.title || `Chapter ${i + 1}`,
+      paragraphs: group.flatMap(ch => ch.paragraphs),
+      sourceCount: group.length,
+    };
+  });
+}
+
+function mapStorySectionsToChapters(storySections, targetCount, audioChapters = []) {
+  if (!storySections.length) return [];
+  const desired = Math.max(1, parseInt(targetCount, 10) || storySections.length);
+
+  if (audioChapters.length === desired) {
+    const mapped = groupStorySectionsByAudioChapters(storySections, audioChapters);
+    if (mapped?.length === desired) return mapped;
+  }
+
+  if (storySections.length > desired) {
+    const grouped = chunkArray(storySections, desired).filter(group => group.length > 0);
+    return grouped.map((group, i) => ({
+      title: audioChapters[i]?.title || group.find(ch => ch.title)?.title || `Chapter ${i + 1}`,
+      paragraphs: group.flatMap(ch => ch.paragraphs),
+      sourceCount: group.length,
+    }));
+  }
+
+  const allParagraphs = storySections.flatMap(ch => ch.paragraphs);
+  const split = chunkParagraphs(allParagraphs, desired);
+  return split.map((paragraphs, i) => ({
+    title: audioChapters[i]?.title || storySections[i]?.title || `Chapter ${i + 1}`,
+    paragraphs,
+    sourceCount: 0,
+  }));
+}
+
+function normalizeEpubChapters(parsed, targetCount, audioChapters = [], bookTitle = '') {
+  const clean = (parsed || []).filter(ch => Array.isArray(ch.paragraphs) && ch.paragraphs.length);
+  if (!clean.length) return { sections: [], storyStartIndex: 0, frontMatterCount: 0, storyCount: 0 };
+
+  const { start, end, stats } = detectStoryBounds(clean, bookTitle, audioChapters);
+  const frontMatter = clean.slice(0, start).map((section, i) => ({
+    title: section.title || `Front Matter ${i + 1}`,
+    paragraphs: section.paragraphs,
+    kind: 'frontMatter',
+    rawIndex: i,
+    syncIndex: null,
+    score: stats[i]?.nonStoryScore || 0,
+  }));
+  const storyRaw = clean.slice(start, end + 1);
+  const backMatter = clean.slice(end + 1).map((section, i) => ({
+    title: section.title || `Back Matter ${i + 1}`,
+    paragraphs: section.paragraphs,
+    kind: 'backMatter',
+    rawIndex: end + 1 + i,
+    syncIndex: null,
+    score: stats[end + 1 + i]?.nonStoryScore || 0,
+  }));
+  const storyChapters = mapStorySectionsToChapters(storyRaw, targetCount, audioChapters).map((section, i) => ({
+    title: audioChapters[i]?.title || section.title || `Chapter ${i + 1}`,
+    paragraphs: section.paragraphs,
+    kind: 'story',
+    syncIndex: i,
+  }));
+  const sections = [...frontMatter, ...storyChapters, ...backMatter];
+  const audioToEpub = Array.from({ length: storyChapters.length }, (_, i) => frontMatter.length + i);
+  const epubToAudio = sections.map(section => section.kind === 'story' ? section.syncIndex : null);
+
+  return {
+    sections,
+    audioToEpub,
+    epubToAudio,
+    storyStartIndex: frontMatter.length,
+    frontMatterCount: frontMatter.length,
+    backMatterCount: backMatter.length,
+    storyCount: storyChapters.length,
+  };
 }
 
 // ── App setup ────────────────────────────────────────────────────────────────
@@ -539,13 +1448,7 @@ function registerIPC() {
   });
 
   // Delete book
-  ipcMain.handle('library:delete', (_e, bookId) => {
-    delete db.books[bookId];
-    delete db.playback[bookId];
-    delete db.bookmarks[bookId];
-    saveDb();
-    return true;
-  });
+  ipcMain.handle('library:delete', (_e, bookId) => deleteBookRecord(bookId, { cleanupManaged: true }));
 
   // Rename book title
   ipcMain.handle('library:rename', (_e, { bookId, title }) => {
@@ -686,7 +1589,415 @@ function registerIPC() {
     return transcribeWindow;
   }
 
-  ipcMain.handle('book:transcribe', async (event, bookId) => {
+  function persistTranscriptArtifacts(book, transcriptText, wordsData, priorMeta = null) {
+    const paths = transcriptCachePaths(book.id);
+    ensureDir(transcriptRootDir());
+    ensureDir(paths.dir);
+
+    const transcriptTmp = path.join(paths.dir, `transcript.${process.pid}.tmp`);
+    const wordsTmp = path.join(paths.dir, `words.${process.pid}.tmp`);
+
+    fs.writeFileSync(transcriptTmp, transcriptText, 'utf8');
+    fs.renameSync(transcriptTmp, paths.transcript);
+
+    safeWriteJson(wordsTmp, wordsData || {});
+    fs.renameSync(wordsTmp, paths.words);
+
+    const currentMeta = safeReadJson(paths.meta) || priorMeta || buildSmartSyncMeta(book);
+    const nextMeta = buildSmartSyncMeta(book, {
+      ...currentMeta,
+      createdAt: currentMeta.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      transcriptComplete: true,
+      alignmentComplete: false,
+      alignmentStatus: 'pending',
+    });
+    safeWriteJson(paths.meta, nextMeta);
+    return nextMeta;
+  }
+
+  function persistAlignmentArtifacts(book, alignmentData, priorMeta = null) {
+    const paths = transcriptCachePaths(book.id);
+    ensureDir(transcriptRootDir());
+    ensureDir(paths.dir);
+    const currentMeta = safeReadJson(paths.meta) || priorMeta || buildSmartSyncMeta(book);
+    const nextMeta = buildSmartSyncMeta(book, {
+      ...currentMeta,
+      createdAt: currentMeta.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      alignmentComplete: !!alignmentData?.complete,
+      alignmentStatus: alignmentData?.status || (alignmentData?.complete ? 'complete' : 'stub'),
+    });
+    safeWriteJson(paths.alignment, alignmentData);
+    safeWriteJson(paths.meta, nextMeta);
+    return nextMeta;
+  }
+
+  function finalizeJob(job, result) {
+    job.result = result;
+    job.status = result?.cancelled ? 'cancelled' : (result?.error ? 'failed' : 'completed');
+    job.stage = result?.error ? 'error' : 'done';
+    job.error = result?.error || null;
+    job.progress = result?.progress || job.progress || null;
+    job.pid = null;
+    job.proc = null;
+    job.updatedAt = new Date().toISOString();
+    smartSyncJobs.set(job.bookId, job);
+    setTimeout(() => {
+      const current = smartSyncJobs.get(job.bookId);
+      if (current === job && (current.status === 'completed' || current.status === 'failed' || current.status === 'cancelled')) {
+        smartSyncJobs.delete(job.bookId);
+      }
+    }, 5 * 60 * 1000);
+    return result;
+  }
+
+  async function runSmartSyncJob(bookId) {
+    const book = db.books[bookId];
+    if (!book) return { error: 'Book not found' };
+
+    const existing = smartSyncJobs.get(bookId);
+    if (existing && (existing.status === 'queued' || existing.status === 'running')) {
+      updateSmartSyncJob(existing, {
+        event: 'queued',
+        payload: { reused: true },
+      });
+      return existing.promise;
+    }
+
+    const job = {
+      bookId,
+      status: 'queued',
+      stage: 'queue',
+      progress: { current: 0, total: Math.max(1, book.chapterCount || book.chapters?.length || 1), percent: 0 },
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      error: null,
+      pid: null,
+      proc: null,
+      cacheHit: false,
+      cancelRequested: false,
+      result: null,
+      promise: null,
+    };
+    smartSyncJobs.set(bookId, job);
+    updateSmartSyncJob(job, {
+      event: 'queued',
+      status: 'queued',
+      stage: 'queue',
+      payload: { chapterCount: book.chapterCount || book.chapters?.length || 0 },
+    });
+
+    job.promise = (async () => {
+      const cache = readTranscriptCache(book);
+      if (isSmartSyncCacheValid(book, cache)) {
+        job.cacheHit = true;
+        updateSmartSyncJob(job, {
+          status: 'completed',
+          stage: 'cache',
+          progress: { current: 1, total: 1, percent: 100 },
+          event: 'cache-hit',
+          payload: {
+            transcriptComplete: !!cache.meta?.transcriptComplete,
+            alignmentComplete: !!cache.meta?.alignmentComplete,
+          },
+        });
+        updateSmartSyncJob(job, {
+          status: 'completed',
+          stage: 'done',
+          progress: { current: 1, total: 1, percent: 100 },
+          event: 'completed',
+          payload: {
+            cacheHit: true,
+            transcriptComplete: !!cache.meta?.transcriptComplete,
+            alignmentComplete: !!cache.meta?.alignmentComplete,
+          },
+        });
+        return finalizeJob(job, {
+          bookId,
+          cacheHit: true,
+          transcript: cache.transcript,
+          words: cache.words,
+          alignment: cache.alignment,
+          meta: cache.meta,
+          progress: { current: 1, total: 1, percent: 100 },
+        });
+      }
+
+      let ffmpegPath;
+      try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
+      catch (e) { return finalizeJob(job, { error: 'ffmpeg not available: ' + e.message }); }
+
+      const scriptPath = path.join(__dirname, 'scripts', 'detect_chapters.py');
+      if (!fs.existsSync(scriptPath)) {
+        return finalizeJob(job, { error: 'Transcription script not found. Reinstall Grimoire.' });
+      }
+
+      const python = await findPython();
+      if (!python) {
+        return finalizeJob(job, {
+          error: 'Python 3 is not installed or not in PATH.\n\nTranscription requires Python 3.9–3.11 and faster-whisper.\nInstall: pip install faster-whisper',
+        });
+      }
+
+      const chaptersArg = (book.chapters || []).map((ch, i) => ({
+        index: i,
+        title: ch.title,
+        filepath: ch.filepath,
+      }));
+
+      updateSmartSyncJob(job, {
+        status: 'running',
+        stage: 'transcription',
+        progress: { current: 0, total: chaptersArg.length || 1, percent: 0 },
+        event: 'transcription-start',
+        payload: { chapterCount: chaptersArg.length, modelName: SMART_SYNC_MODEL },
+      });
+
+      return new Promise((resolve) => {
+        const { spawn } = require('child_process');
+        const proc = spawn(python.exe, [
+          ...python.args,
+          scriptPath,
+          '--mode', 'transcribe',
+          '--chapters-json', JSON.stringify(chaptersArg),
+          '--ffmpeg', ffmpegPath,
+        ], { stdio: ['ignore', 'pipe', 'pipe'], env: cudaEnv() });
+
+        job.proc = proc;
+        job.pid = proc.pid;
+        smartSyncJobs.set(bookId, job);
+
+        let buf = '';
+        let stderrBuf = '';
+        let transcriptText = '';
+        let wordsData = {};
+        let alignmentData = null;
+        let transcriptMeta = cache.meta || buildSmartSyncMeta(book);
+        let handledClose = false;
+
+        proc.stdout.on('data', chunk => {
+          buf += chunk.toString();
+          const lines = buf.split('\n');
+          buf = lines.pop();
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const msg = JSON.parse(trimmed);
+              if (msg.type === 'loading') {
+                updateSmartSyncJob(job, {
+                  status: 'running',
+                  stage: 'transcription',
+                  event: 'model-loading',
+                  payload: { message: msg.message || '' },
+                });
+              } else if (msg.type === 'device') {
+                updateSmartSyncJob(job, {
+                  status: 'running',
+                  stage: 'transcription',
+                  event: 'transcription-start',
+                  payload: {
+                    chapterCount: chaptersArg.length,
+                    modelName: SMART_SYNC_MODEL,
+                    device: msg.device,
+                    computeType: msg.compute_type,
+                  },
+                });
+              } else if (msg.type === 'progress' && msg.phase === 'transcription') {
+                const current = Math.max(0, parseInt(msg.current, 10) || 0);
+                const total = Math.max(1, parseInt(msg.total, 10) || chaptersArg.length || 1);
+                const percent = Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+                updateSmartSyncJob(job, {
+                  status: 'running',
+                  stage: 'transcription',
+                  progress: { current, total, percent },
+                  event: 'transcription-progress',
+                  payload: {
+                    chapterIndex: msg.chapterIndex,
+                    chapterTitle: msg.chapterTitle || '',
+                  },
+                });
+              } else if (msg.type === 'phase' && msg.phase === 'transcription' && msg.event === 'complete') {
+                updateSmartSyncJob(job, {
+                  status: 'running',
+                  stage: 'transcription',
+                  progress: { current: chaptersArg.length || 1, total: chaptersArg.length || 1, percent: 100 },
+                  event: 'transcript-complete',
+                  payload: { chapterCount: chaptersArg.length },
+                });
+              } else if (msg.type === 'chapter') {
+                const current = (parseInt(msg.chapterIndex, 10) || 0) + 1;
+                const total = Math.max(1, parseInt(msg.total, 10) || chaptersArg.length || 1);
+                const percent = Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+                updateSmartSyncJob(job, {
+                  status: 'running',
+                  stage: 'transcription',
+                  progress: { current, total, percent },
+                  event: 'transcription-progress',
+                  payload: {
+                    chapterIndex: msg.chapterIndex,
+                    chapterTitle: msg.chapterTitle || '',
+                    text: msg.text || '',
+                    words: msg.words || [],
+                  },
+                });
+              } else if (msg.type === 'transcript') {
+                transcriptText = String(msg.text || '');
+                wordsData = msg.wordsByChapter || {};
+                transcriptMeta = persistTranscriptArtifacts(book, transcriptText, wordsData, transcriptMeta);
+                updateSmartSyncJob(job, {
+                  status: 'running',
+                  stage: 'transcription',
+                  progress: { current: chaptersArg.length || 1, total: chaptersArg.length || 1, percent: 100 },
+                  event: 'transcript-complete',
+                  payload: {
+                    chapterCount: chaptersArg.length,
+                    transcriptComplete: true,
+                  },
+                });
+              } else if (msg.type === 'phase' && msg.phase === 'alignment' && msg.event === 'start') {
+                updateSmartSyncJob(job, {
+                  status: 'running',
+                  stage: 'alignment',
+                  progress: { current: 0, total: 1, percent: 0 },
+                  event: 'alignment-start',
+                  payload: { mode: msg.mode || 'stub' },
+                });
+              } else if (msg.type === 'progress' && msg.phase === 'alignment') {
+                const current = Math.max(0, parseInt(msg.current, 10) || 0);
+                const total = Math.max(1, parseInt(msg.total, 10) || 1);
+                const percent = Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+                updateSmartSyncJob(job, {
+                  status: 'running',
+                  stage: 'alignment',
+                  progress: { current, total, percent },
+                  event: 'alignment-progress',
+                  payload: { message: msg.message || '', stub: !!msg.stub },
+                });
+              } else if (msg.type === 'alignment') {
+                alignmentData = msg.data || null;
+                transcriptMeta = persistAlignmentArtifacts(book, alignmentData, transcriptMeta);
+                updateSmartSyncJob(job, {
+                  status: 'running',
+                  stage: 'alignment',
+                  progress: { current: 1, total: 1, percent: 100 },
+                  event: 'alignment-complete',
+                  payload: {
+                    alignmentComplete: !!alignmentData?.complete,
+                    alignmentStatus: alignmentData?.status || 'stub',
+                    stub: !!alignmentData?.stub,
+                  },
+                });
+              } else if (msg.type === 'error') {
+                stderrBuf += (msg.message || 'Unknown worker error');
+              }
+            } catch {}
+          }
+        });
+
+        proc.stderr.on('data', chunk => { stderrBuf += chunk.toString(); });
+
+        proc.on('close', code => {
+          if (handledClose) return;
+          handledClose = true;
+
+          if (job.cancelRequested) {
+            updateSmartSyncJob(job, {
+              status: 'cancelled',
+              stage: 'done',
+              progress: job.progress,
+              event: 'failed',
+              payload: { cancelled: true },
+            });
+            return resolve(finalizeJob(job, {
+              cancelled: true,
+              error: 'Cancelled',
+              progress: job.progress,
+            }));
+          }
+
+          if (code === 0) {
+            const cacheAfter = readTranscriptCache(book);
+            updateSmartSyncJob(job, {
+              status: 'completed',
+              stage: 'done',
+              progress: { current: 1, total: 1, percent: 100 },
+              event: 'completed',
+              payload: {
+                cacheHit: false,
+                transcriptComplete: !!cacheAfter.meta?.transcriptComplete,
+                alignmentComplete: !!cacheAfter.meta?.alignmentComplete,
+              },
+            });
+            return resolve(finalizeJob(job, {
+              bookId,
+              cacheHit: false,
+              transcript: cacheAfter.transcript || transcriptText,
+              words: cacheAfter.words || wordsData,
+              alignment: cacheAfter.alignment || alignmentData,
+              meta: cacheAfter.meta || transcriptMeta,
+              progress: { current: 1, total: 1, percent: 100 },
+            }));
+          }
+
+          const notInstalled = /No module named ['"]faster_whisper/i.test(stderrBuf)
+            || /ModuleNotFoundError/i.test(stderrBuf);
+          const error = notInstalled
+            ? 'faster-whisper is not installed.\n\nRun: pip install faster-whisper'
+            : (stderrBuf.slice(-600) || `Process exited with code ${code}`);
+          updateSmartSyncJob(job, {
+            status: 'failed',
+            stage: 'error',
+            error,
+            event: 'failed',
+            payload: { code },
+          });
+          resolve(finalizeJob(job, { error, progress: job.progress }));
+        });
+
+        proc.on('error', err => {
+          updateSmartSyncJob(job, {
+            status: 'failed',
+            stage: 'error',
+            error: err.message,
+            event: 'failed',
+          });
+          resolve(finalizeJob(job, { error: err.message, progress: job.progress }));
+        });
+      });
+    })();
+
+    return job.promise;
+  }
+
+  ipcMain.handle('book:transcribe', async (_event, bookId) => runSmartSyncJob(bookId));
+
+  ipcMain.handle('transcribe:getJob', (_e, bookId) => {
+    const job = smartSyncJobs.get(bookId);
+    return publicJobState(job);
+  });
+
+  ipcMain.handle('transcribe:cancel', (_e, bookId) => {
+    const job = smartSyncJobs.get(bookId);
+    if (!job) return { success: false, error: 'No active job for this book.' };
+    if (!job.proc || job.status !== 'running') return { success: false, error: 'Job is not running.' };
+    job.cancelRequested = true;
+    try {
+      job.proc.kill();
+      updateSmartSyncJob(job, {
+        status: 'cancelled',
+        stage: 'done',
+        event: 'failed',
+        payload: { cancelled: true },
+      });
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('book:transcribe:legacy', async (event, bookId) => {
     const book = db.books[bookId];
     if (!book) return { error: 'Book not found' };
 
@@ -920,16 +2231,21 @@ function registerIPC() {
   });
 
   ipcMain.handle('transcript:get', (_e, bookId) => {
-    const fp = path.join(app.getPath('userData'), 'transcripts', `${bookId}_full.txt`);
-    if (!fs.existsSync(fp)) return null;
-    return fs.readFileSync(fp, 'utf8');
+    const book = db.books[bookId] || { id: bookId, chapters: [] };
+    return readTranscriptCache(book).transcript;
+  });
+
+  ipcMain.handle('transcript:exists', (_e, bookId) => {
+    const legacy = legacyTranscriptPaths(bookId).transcript;
+    if (fs.existsSync(legacy)) return { exists: true, source: 'legacy' };
+    const book = db.books[bookId] || { id: bookId, chapters: [] };
+    const cache = readTranscriptCache(book);
+    return { exists: !!cache.transcript, source: cache.transcript ? 'cache' : null };
   });
 
   ipcMain.handle('transcript:getWords', (_e, bookId) => {
-    const fp = path.join(app.getPath('userData'), 'transcripts', `${bookId}_words.json`);
-    if (!fs.existsSync(fp)) return null;
-    try { return JSON.parse(fs.readFileSync(fp, 'utf8')); }
-    catch { return null; }
+    const book = db.books[bookId] || { id: bookId, chapters: [] };
+    return readTranscriptCache(book).words;
   });
 
   // AI chapter detection — sliding-window scan via detect_chapters.py
@@ -1101,8 +2417,8 @@ function registerIPC() {
 
   // ── Auth ─────────────────────────────────────────────────────────────────────
 
-  ipcMain.handle('auth:getSession', () => {
-    if (currentUser) return { user: { id: currentUser.id, email: currentUser.email } };
+  ipcMain.handle('auth:getSession', async () => {
+    if (currentUser) return { user: publicUser(currentUser) };
     if (isAuthSkipped()) return { skipped: true };
     return null;
   });
@@ -1110,24 +2426,35 @@ function registerIPC() {
   ipcMain.handle('auth:login', async (_e, { email, password }) => {
     if (!supabase) return { error: 'Sync unavailable' };
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
       if (error) return { error: error.message };
       // Explicitly set session so all subsequent requests carry the JWT
       await supabase.auth.setSession({
         access_token: data.session.access_token,
         refresh_token: data.session.refresh_token,
       });
-      currentUser = data.user;
+      currentUser = await hydrateAuthUser(data.user);
       saveSession(data.session);
       setAuthSkipped(false);
-      return { user: { id: data.user.id, email: data.user.email } };
+      return { user: publicUser(currentUser) };
     } catch (e) { return { error: e.message }; }
   });
 
-  ipcMain.handle('auth:signup', async (_e, { email, password }) => {
+  ipcMain.handle('auth:signup', async (_e, { email, username, password }) => {
     if (!supabase) return { error: 'Sync unavailable' };
     try {
-      const { data, error } = await supabase.auth.signUp({ email, password });
+      const trimmedEmail = String(email || '').trim();
+      if (!trimmedEmail) return { error: 'Email is required.' };
+      const validated = validateUsername(username);
+      if (validated.error) return { error: validated.error };
+
+      const existing = await getUserProfileByUsername(validated.value);
+      if (existing) return { error: 'That username is already taken.' };
+
+      const { data, error } = await supabase.auth.signUp({ email: trimmedEmail, password });
       if (error) return { error: error.message };
       if (data.session) {
         // Explicitly set session so all subsequent requests carry the JWT
@@ -1135,10 +2462,10 @@ function registerIPC() {
           access_token: data.session.access_token,
           refresh_token: data.session.refresh_token,
         });
-        currentUser = data.user;
+        currentUser = await hydrateAuthUser(data.user, validated.value);
         saveSession(data.session);
         setAuthSkipped(false);
-        return { user: { id: data.user.id, email: data.user.email } };
+        return { user: publicUser(currentUser) };
       }
       return { needsConfirmation: true };
     } catch (e) { return { error: e.message }; }
@@ -1259,21 +2586,21 @@ function registerIPC() {
 
   // ── User approval ─────────────────────────────────────────────────────────────
 
-  ipcMain.handle('auth:checkApproval', async () => {
+  ipcMain.handle('auth:checkApproval:legacy', async () => {
     if (!supabase || !currentUser) return { error: 'Not logged in' };
-    const ADMIN_EMAIL = 'bakrferas@gmail.com';
     // Admin always approved — short-circuit before any DB call
-    if (currentUser.email === ADMIN_EMAIL) return { approved: true };
+    currentUser = await hydrateAuthUser(currentUser);
+    return { approved: true, user: publicUser(currentUser) };
     try {
       const { data, error } = await supabase
         .from('user_profiles')
         .select('approved')
-        .eq('user_id', currentUser.id)
+        .eq('id', currentUser.id)
         .single();
       if (error?.code === 'PGRST116') {
         // Profile does not exist — create with approved=false
         await supabase.from('user_profiles').insert({
-          user_id: currentUser.id,
+          id: currentUser.id,
           email: currentUser.email,
           approved: false,
         });
@@ -1286,6 +2613,161 @@ function registerIPC() {
 
   // ── Marketplace ───────────────────────────────────────────────────────────────
 
+  async function loadNormalizedCommentsForBook(bookId) {
+    const { data: commentRows, error: commentError } = await supabase
+      .from('comments')
+      .select('*')
+      .eq('book_id', bookId)
+      .order('chapter_index', { ascending: true })
+      .order('audio_timestamp_seconds', { ascending: true })
+      .order('created_at', { ascending: true });
+    if (commentError) throw new Error(commentError.message);
+
+    const commentIds = (commentRows || []).map(row => row.id).filter(Boolean);
+    let replyRows = [];
+    if (commentIds.length) {
+      const replyResult = await supabase
+        .from('comment_replies')
+        .select('*')
+        .in('comment_id', commentIds)
+        .order('created_at', { ascending: true });
+      if (replyResult.error) throw new Error(replyResult.error.message);
+      replyRows = replyResult.data || [];
+    }
+
+    const profiles = await fetchProfilesByIds([
+      ...(commentRows || []).map(row => row.user_id),
+      ...replyRows.map(row => row.user_id),
+    ]);
+
+    const repliesByComment = new Map();
+    for (const row of replyRows) {
+      const reply = normalizeReplyRow(row, profiles);
+      if (!repliesByComment.has(reply.commentId)) repliesByComment.set(reply.commentId, []);
+      repliesByComment.get(reply.commentId).push(reply);
+    }
+
+    return (commentRows || []).map(row => normalizeCommentRow(row, profiles, repliesByComment));
+  }
+
+  function buildCommentInsertVariants(payload) {
+    const base = {
+      user_id: currentUser.id,
+      username: currentUser.username || null,
+      book_id: payload.bookId,
+      chapter_index: payload.chapterIndex,
+      audio_timestamp_seconds: payload.audioTimestampSeconds,
+      created_at: new Date().toISOString(),
+    };
+    const locationVariants = payload.selectedText
+      ? [
+          {
+            text: payload.selectedText,
+            chapter: payload.epubChapterIndex ?? null,
+            paragraph: payload.epubParagraphIndex ?? null,
+          },
+          null,
+        ]
+      : [null];
+
+    const variants = [];
+    for (const textColumn of COMMENT_TEXT_COLUMNS) {
+      for (const location of locationVariants) {
+        if (location) {
+          for (const columns of COMMENT_SELECTION_COLUMNS) {
+            variants.push({
+              ...base,
+              [textColumn]: payload.text,
+              [columns.text]: location.text,
+              [columns.chapter]: location.chapter,
+              [columns.paragraph]: location.paragraph,
+            });
+          }
+        } else {
+          variants.push({
+            ...base,
+            [textColumn]: payload.text,
+          });
+        }
+      }
+    }
+    return variants;
+  }
+
+  function buildReplyInsertVariants(commentId, text) {
+    return REPLY_TEXT_COLUMNS.map(column => ({
+      comment_id: commentId,
+      user_id: currentUser.id,
+      [column]: text,
+      created_at: new Date().toISOString(),
+    }));
+  }
+
+  // Resolve to the canonical catalog ID so all users who own the same book
+  // share the same comment thread, regardless of their local copy's UUID.
+  function resolveCommentBookId(bookId) {
+    const book = db.books[String(bookId)];
+    return book?.sourceCatalogId || book?.catalogId || bookId;
+  }
+
+  ipcMain.handle('comments:getBook', async (_e, { bookId }) => {
+    if (!supabase || !currentUser) return { error: 'Not logged in' };
+    try {
+      currentUser = await hydrateAuthUser(currentUser);
+      return { comments: await loadNormalizedCommentsForBook(resolveCommentBookId(bookId)) };
+    } catch (e) {
+      return { error: e.message };
+    }
+  });
+
+  ipcMain.handle('comments:create', async (_e, payload) => {
+    if (!supabase || !currentUser) return { error: 'Not logged in' };
+    const text = String(payload?.text || '').trim();
+    if (!text) return { error: 'Comment cannot be empty.' };
+    try {
+      currentUser = await hydrateAuthUser(currentUser);
+      const inserted = await insertWithVariants('comments', buildCommentInsertVariants({
+        bookId: resolveCommentBookId(payload.bookId),
+        chapterIndex: payload.chapterIndex,
+        audioTimestampSeconds: payload.audioTimestampSeconds,
+        text,
+        selectedText: payload.selectedText || null,
+        epubChapterIndex: payload.epubChapterIndex,
+        epubParagraphIndex: payload.epubParagraphIndex,
+      }));
+      const profiles = await fetchProfilesByIds([inserted.user_id]);
+      const comment = normalizeCommentRow(inserted, profiles, new Map());
+      return { comment };
+    } catch (e) {
+      return { error: e.message };
+    }
+  });
+
+  ipcMain.handle('comments:delete', async (_e, { commentId }) => {
+    if (!supabase || !currentUser) return { error: 'Not logged in' };
+    try {
+      const { data, error } = await supabase
+        .from('comments')
+        .select('id, user_id')
+        .eq('id', commentId)
+        .limit(1);
+      if (error) return { error: error.message };
+      const comment = data?.[0];
+      if (!comment) return { error: 'Comment not found.' };
+
+      const { error: deleteError } = await supabase.from('comments').delete().eq('id', commentId);
+      if (deleteError) return { error: deleteError.message };
+      return { success: true };
+    } catch (e) {
+      return { error: e.message };
+    }
+  });
+
+  ipcMain.on('comment:reached', (_e, { username, text }) => {
+    if (!Notification.isSupported()) return;
+    new Notification({ title: 'Grimoire', body: `${username || 'Unknown'}: ${text || ''}` }).show();
+  });
+
   async function catalogCoverUrl(coverS3Key, cfg) {
     if (!coverS3Key || !cfg?.accessKeyId) return null;
     try {
@@ -1297,6 +2779,111 @@ function registerIPC() {
         { expiresIn: 7200 }
       );
     } catch { return null; }
+  }
+
+  async function catalogObjectUrl(s3Key, cfg, expiresIn = 7200) {
+    if (!s3Key || !cfg?.accessKeyId) throw new Error('S3 not configured');
+    const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+    const { GetObjectCommand } = require('@aws-sdk/client-s3');
+    return await getSignedUrl(
+      createS3Client(cfg),
+      new GetObjectCommand({ Bucket: cfg.bucket, Key: s3Key }),
+      { expiresIn }
+    );
+  }
+
+  async function fetchCatalogBookById(bookId) {
+    const { data: catBook, error } = await supabase
+      .from('catalog')
+      .select('*')
+      .eq('id', bookId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!catBook) throw new Error('Catalog book not found');
+    return catBook;
+  }
+
+  async function ensureCatalogOwnership(bookId) {
+    const book = await fetchCatalogBookById(bookId);
+    if (!currentUser?.id) throw new Error('Not authenticated');
+    if (book.uploaded_by !== currentUser.id) {
+      throw new Error('Only the uploader can modify this marketplace book.');
+    }
+    return book;
+  }
+
+  async function localizeCatalogBook(catBook) {
+    const cfg = loadS3Config();
+    if (!cfg?.accessKeyId) throw new Error('S3 not configured');
+    if (!catBook?.s3_prefix) throw new Error('Catalog book is missing its storage path');
+
+    const sourceChapters = Array.isArray(catBook?.chapters) ? catBook.chapters : [];
+    if (!sourceChapters.length) throw new Error('Catalog book has no chapters to download');
+
+    const existing = db.books[catBook.id] || null;
+    const targetDir = managedCatalogBookDir(catBook.id);
+    ensureDir(managedLibraryRootDir());
+    ensureDir(targetDir);
+
+    const localChapters = [];
+    for (let i = 0; i < sourceChapters.length; i++) {
+      const sourceChapter = sourceChapters[i] || {};
+      const sourceFilename = String(sourceChapter.filename || '').trim();
+      const filename = path.basename(sourceFilename || `Chapter ${i + 1}.mp3`);
+      const filepath = path.join(targetDir, filename);
+      if (!fs.existsSync(filepath)) {
+        if (!sourceFilename) throw new Error(`Catalog chapter ${i + 1} is missing a filename`);
+        const url = await catalogObjectUrl(`${catBook.s3_prefix}${sourceFilename}`, cfg);
+        await downloadToFile(url, filepath);
+      }
+      localChapters.push({
+        id: i,
+        filename,
+        filepath,
+        title: sourceChapter.title || chapterTitle(filename),
+        duration: sourceChapter.duration || existing?.chapters?.[i]?.duration || 0,
+      });
+    }
+
+    let coverPath = existing?.coverPath && fs.existsSync(existing.coverPath) ? existing.coverPath : null;
+    const keepExistingCover = coverPath && !isPathInside(targetDir, coverPath);
+    if (!keepExistingCover && catBook.cover_s3_key) {
+      const ext = path.extname(catBook.cover_s3_key).toLowerCase() || '.jpg';
+      const managedCoverPath = path.join(targetDir, `cover${ext}`);
+      if (!fs.existsSync(managedCoverPath)) {
+        const coverUrl = await catalogObjectUrl(catBook.cover_s3_key, cfg);
+        try { await downloadToFile(coverUrl, managedCoverPath); }
+        catch (e) { console.warn('Catalog cover download skipped:', e.message); }
+      }
+      if (fs.existsSync(managedCoverPath)) coverPath = managedCoverPath;
+    }
+
+    const localizedBook = {
+      ...existing,
+      id: catBook.id,
+      title: catBook.title,
+      author: catBook.author || existing?.author || '',
+      series: catBook.series || existing?.series || null,
+      seriesOrder: catBook.series_order || existing?.seriesOrder || null,
+      folderPath: targetDir,
+      chapterCount: catBook.chapter_count || localChapters.length,
+      addedAt: existing?.addedAt || new Date().toISOString(),
+      coverPath,
+      chapters: localChapters,
+      managedFolder: true,
+      catalogId: catBook.id,
+      sourceCatalogId: catBook.id,
+      s3Prefix: catBook.s3_prefix || existing?.s3Prefix || null,
+      uploadedBy: catBook.uploaded_by || existing?.uploadedBy || null,
+      hasEpub: !!(existing?.epubPath || existing?.hasEpub || catBook.has_epub),
+      epubKey: catBook.epub_key || existing?.epubKey || null,
+      isCatalog: false,
+      isCloudOnly: false,
+    };
+
+    db.books[catBook.id] = localizedBook;
+    saveDb();
+    return localizedBook;
   }
 
   ipcMain.handle('catalog:getAll', async () => {
@@ -1364,17 +2951,39 @@ function registerIPC() {
 
   ipcMain.handle('catalog:addToLibrary', async (_e, { bookId }) => {
     if (!supabase || !currentUser) return { error: 'Not logged in' };
+    let insertedLibraryRow = false;
+    const hadManagedLocalBook = !!db.books[bookId];
     try {
+      const catBook = await fetchCatalogBookById(bookId);
       const { data: existing } = await supabase
         .from('user_library').select('id')
         .eq('user_id', currentUser.id).eq('book_id', bookId).maybeSingle();
-      if (existing) return { success: true, alreadyAdded: true };
-      const { error } = await supabase.from('user_library').insert({
-        user_id: currentUser.id, book_id: bookId,
-      });
-      if (error) return { error: error.message };
-      return { success: true };
-    } catch (e) { return { error: e.message }; }
+
+      if (!existing) {
+        const { error } = await supabase.from('user_library').insert({
+          user_id: currentUser.id, book_id: bookId,
+        });
+        if (error) return { error: error.message };
+        insertedLibraryRow = true;
+      }
+
+      const localizedBook = await localizeCatalogBook(catBook);
+      return {
+        success: true,
+        alreadyAdded: !!existing,
+        downloaded: true,
+        book: { ...localizedBook, playback: db.playback[bookId] || null },
+      };
+    } catch (e) {
+      if (insertedLibraryRow) {
+        try {
+          await supabase.from('user_library')
+            .delete().eq('user_id', currentUser.id).eq('book_id', bookId);
+        } catch {}
+      }
+      if (!hadManagedLocalBook) cleanupManagedCatalogBookFiles(bookId);
+      return { error: e.message };
+    }
   });
 
   ipcMain.handle('catalog:removeFromLibrary', async (_e, { bookId }) => {
@@ -1383,9 +2992,13 @@ function registerIPC() {
       const { error } = await supabase.from('user_library')
         .delete().eq('user_id', currentUser.id).eq('book_id', bookId);
       if (error) return { error: error.message };
-      delete db.playback[bookId];
-      delete db.bookmarks[bookId];
-      saveDb();
+      if (db.books[bookId] && isManagedCatalogBook(db.books[bookId], bookId)) {
+        deleteBookRecord(bookId, { cleanupManaged: true });
+      } else {
+        delete db.playback[bookId];
+        delete db.bookmarks[bookId];
+        saveDb();
+      }
       return { success: true };
     } catch (e) { return { error: e.message }; }
   });
@@ -1495,23 +3108,26 @@ function registerIPC() {
 
   ipcMain.handle('catalog:editBook', async (_e, { bookId, title, author, series, seriesOrder }) => {
     if (!supabase || !currentUser) return { error: 'Not authenticated' };
-    const updates = {};
-    if (title   !== undefined) updates.title        = String(title   || '').trim() || null;
-    if (author  !== undefined) updates.author       = String(author  || '').trim() || null;
-    if (series  !== undefined) updates.series       = String(series  || '').trim() || null;
-    if (seriesOrder !== undefined) updates.series_order = seriesOrder ? parseInt(String(seriesOrder), 10) : null;
-    if (!updates.title) return { error: 'Title is required' };
-    const { error } = await supabase.from('catalog').update(updates).eq('id', bookId);
-    if (error) return { error: error.message };
-    return { success: true };
+    try {
+      await ensureCatalogOwnership(bookId);
+      const updates = {};
+      if (title   !== undefined) updates.title        = String(title   || '').trim() || null;
+      if (author  !== undefined) updates.author       = String(author  || '').trim() || null;
+      if (series  !== undefined) updates.series       = String(series  || '').trim() || null;
+      if (seriesOrder !== undefined) updates.series_order = seriesOrder ? parseInt(String(seriesOrder), 10) : null;
+      if (!updates.title) return { error: 'Title is required' };
+      const { error } = await supabase.from('catalog').update(updates).eq('id', bookId);
+      if (error) return { error: error.message };
+      return { success: true };
+    } catch (e) {
+      return { error: e.message };
+    }
   });
 
   ipcMain.handle('catalog:deleteBook', async (_e, { bookId }) => {
     if (!supabase || !currentUser) return { error: 'Not authenticated' };
     try {
-      // Fetch book to get s3_prefix
-      const { data: book, error: fetchErr } = await supabase.from('catalog').select('s3_prefix').eq('id', bookId).single();
-      if (fetchErr || !book) return { error: 'Book not found' };
+      const book = await ensureCatalogOwnership(bookId);
 
       // Delete all S3 objects under the prefix
       const cfg = loadS3Config();
@@ -1553,6 +3169,9 @@ function registerIPC() {
     const book = db.books[bookId];
     if (!book) return { error: 'Book not found' };
     try {
+      for (const key of epubMemoryCache.keys()) {
+        if (key.includes(`"bookId":"${bookId}"`)) epubMemoryCache.delete(key);
+      }
       const epubDir = path.join(app.getPath('userData'), 'epubs');
       if (!fs.existsSync(epubDir)) fs.mkdirSync(epubDir, { recursive: true });
       const dest = path.join(epubDir, `${bookId}.epub`);
@@ -1572,6 +3191,10 @@ function registerIPC() {
     const cfg = loadS3Config();
     if (!cfg?.accessKeyId) return { error: 'S3 not configured' };
     try {
+      await ensureCatalogOwnership(bookId);
+      for (const key of epubMemoryCache.keys()) {
+        if (key.includes(`"bookId":"${bookId}"`)) epubMemoryCache.delete(key);
+      }
       const { Upload } = require('@aws-sdk/lib-storage');
       const s3 = createS3Client(cfg);
       const s3Key = `catalog/${bookId}/book.epub`;
@@ -1599,11 +3222,40 @@ function registerIPC() {
     } catch (e) { return { error: e.message }; }
   });
 
-  ipcMain.handle('epub:ensureAndParse', async (_e, { bookId, epubKey }) => {
+  ipcMain.handle('epub:ensureAndParse', async (_e, { bookId, epubKey, chapterCount, audioChapters, bookTitle }) => {
     const cacheDir = path.join(app.getPath('userData'), 'epub-cache');
     const cacheFile = path.join(cacheDir, `${bookId}.json`);
+    const cacheKey = JSON.stringify({
+      bookId,
+      bookTitle: bookTitle || '',
+      chapterCount: chapterCount || 0,
+      titles: (audioChapters || []).map(ch => ch?.title || ''),
+    });
+    if (epubMemoryCache.has(cacheKey)) {
+      return epubMemoryCache.get(cacheKey);
+    }
     if (fs.existsSync(cacheFile)) {
-      try { return { chapters: JSON.parse(fs.readFileSync(cacheFile, 'utf8')) }; } catch {}
+      try {
+        const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+        const chapters = Array.isArray(cached?.chapters) ? cached.chapters : cached;
+        const meta = cached?.meta || null;
+        const wantedTitles = (audioChapters || []).map(ch => ch?.title || '');
+        const metaMatches = !meta ||
+          ((meta.chapterCount || 0) === (chapterCount || 0) &&
+           (meta.bookTitle || '') === (bookTitle || '') &&
+           JSON.stringify(meta.audioTitles || []) === JSON.stringify(wantedTitles));
+        if (metaMatches && Array.isArray(chapters) && chapters.length) {
+          const normalized = cached?.sections ? cached : {
+            sections: chapters,
+            storyStartIndex: 0,
+            frontMatterCount: 0,
+            backMatterCount: 0,
+            storyCount: chapters.length,
+          };
+          epubMemoryCache.set(cacheKey, normalized);
+          return normalized;
+        }
+      } catch {}
     }
     let epubPath = null;
     if (db.books[bookId]?.epubPath && fs.existsSync(db.books[bookId].epubPath))
@@ -1629,17 +3281,31 @@ function registerIPC() {
     }
     if (!epubPath) return { error: 'No EPUB file found. Attach one first via right-click.' };
     try {
-      const chapters = await parseEpubFile(epubPath);
+      const parsed = await parseEpubFile(epubPath);
+      const normalized = normalizeEpubChapters(parsed, chapterCount, audioChapters, bookTitle || db.books[bookId]?.title || '');
       if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
-      fs.writeFileSync(cacheFile, JSON.stringify(chapters), 'utf8');
-      return { chapters };
+      fs.writeFileSync(cacheFile, JSON.stringify({
+        meta: {
+          bookTitle: bookTitle || '',
+          chapterCount: chapterCount || 0,
+          audioTitles: (audioChapters || []).map(ch => ch?.title || ''),
+        },
+        ...normalized,
+        chapters: normalized.sections,
+      }), 'utf8');
+      epubMemoryCache.set(cacheKey, normalized);
+      return normalized;
     } catch (e) { return { error: 'EPUB parse error: ' + e.message }; }
   });
 
   ipcMain.handle('epub:getReadingPos', (_e, { bookId }) => {
     try {
       const f = path.join(app.getPath('userData'), 'epub-reading-pos.json');
-      if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8'))[bookId] || {};
+      if (fs.existsSync(f)) {
+        const data = JSON.parse(fs.readFileSync(f, 'utf8'));
+        const key = currentUser?.id || 'local';
+        return data[key]?.[bookId] || {};
+      }
     } catch {}
     return {};
   });
@@ -1649,8 +3315,10 @@ function registerIPC() {
       const f = path.join(app.getPath('userData'), 'epub-reading-pos.json');
       let d = {};
       try { d = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
-      if (!d[bookId]) d[bookId] = {};
-      d[bookId][String(chapterIndex)] = scrollTop;
+      const key = currentUser?.id || 'local';
+      if (!d[key]) d[key] = {};
+      if (!d[key][bookId]) d[key][bookId] = {};
+      d[key][bookId][String(chapterIndex)] = scrollTop;
       fs.writeFileSync(f, JSON.stringify(d), 'utf8');
     } catch {}
     return { success: true };
@@ -1659,14 +3327,21 @@ function registerIPC() {
   ipcMain.handle('epub:getReaderSettings', () => {
     try {
       const f = path.join(app.getPath('userData'), 'epub-reader-settings.json');
-      if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (fs.existsSync(f)) {
+        const all = JSON.parse(fs.readFileSync(f, 'utf8'));
+        return all[currentUser?.id || 'local'] || null;
+      }
     } catch {}
     return null;
   });
 
   ipcMain.handle('epub:saveReaderSettings', (_e, settings) => {
     try {
-      fs.writeFileSync(path.join(app.getPath('userData'), 'epub-reader-settings.json'), JSON.stringify(settings, null, 2), 'utf8');
+      const f = path.join(app.getPath('userData'), 'epub-reader-settings.json');
+      let all = {};
+      try { all = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
+      all[currentUser?.id || 'local'] = settings;
+      fs.writeFileSync(f, JSON.stringify(all, null, 2), 'utf8');
     } catch {}
     return { success: true };
   });

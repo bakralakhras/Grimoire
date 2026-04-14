@@ -27,8 +27,31 @@ const S = {
   syncInterval: null,
 };
 
+const SMART_SYNC_UI = {
+  byBookId: {},
+  startingBookIds: new Set(),
+  progressListenerAttached: false,
+  refreshToken: 0,
+};
+
+const COMMENTS = {
+  byBookId: {},
+  pollTimer: null,
+  requestToken: 0,
+  triggeredIds: new Set(),
+  toastQueue: [],
+  activeToast: null,
+  toastShowTimer: null,
+  toastHideTimer: null,
+  lastBookId: null,
+  lastChapterIndex: 0,
+  lastPlaybackTime: 0,
+  composerContext: null,
+  epubSelection: null,
+};
+
 // ── Auth / sync state ─────────────────────────────────────────────────────────
-let authUser = null;      // { id, email } when logged in
+let authUser = null;      // { id, email, username } when logged in
 let _progressPushTimer = null;
 
 // ── EPUB state ────────────────────────────────────────────────────────────────
@@ -46,7 +69,7 @@ const EPUB_DEFAULT_SETTINGS = {
   columnWidth:      'medium',
   hyphenation:      true,
 };
-const EPUB_COLUMN_WIDTHS = { narrow: 520, medium: 680, wide: 860 };
+const EPUB_COLUMN_WIDTHS = { single: 0, narrow: 520, medium: 680, wide: 860 };
 const EPUB_FONTS = [
   { label: 'Georgia',       value: 'Georgia, serif' },
   { label: 'Palatino',      value: '"Palatino Linotype", Palatino, serif' },
@@ -57,6 +80,7 @@ const EPUB_FONTS = [
   { label: 'Source Sans',   value: '"Source Sans 3", sans-serif' },
   { label: 'Roboto',        value: 'Roboto, sans-serif' },
   { label: 'Courier New',   value: '"Courier New", monospace' },
+  { label: 'iA Writer Mono',value: '"iA Writer Mono", "IBM Plex Mono", monospace' },
 ];
 const EPUB_BG_PRESETS = [
   { label: 'Black',      color: '#0a0a0f' },
@@ -76,13 +100,24 @@ const EPUB_TEXT_PRESETS = [
 
 const EPUB = {
   chapters: [],
+  frontMatterCount: 0,
+  backMatterCount: 0,
+  storyStartIndex: 0,
   currentChapter: 0,
   isOpen: false,
   tocOpen: true,
+  appSidebarOpen: true,
+  audioPanelsOpen: true,
+  readerOnly: false,
   readingPos: {},
-  settings: { ...EPUB_DEFAULT_SETTINGS },
+  sectionEls: [],
+  currentScrollSource: 'user',
+  scrollReleaseAt: 0,
+  activeRaf: null,
   _saveTimer: null,
   _scrollTimer: null,
+  _resizeTimer: null,
+  settings: { ...EPUB_DEFAULT_SETTINGS },
 };
 
 // ── Audio ────────────────────────────────────────────────────────────────────
@@ -130,6 +165,90 @@ function bookColor(title) {
 
 function initials(title) {
   return (title || '?').split(/\s+/).filter(w => w.length > 1).slice(0, 2).map(w => w[0].toUpperCase()).join('') || title[0].toUpperCase();
+}
+
+function displayUsername(user = authUser) {
+  if (!user) return 'Not signed in';
+  return user.username || (user.email ? user.email.split('@')[0] : 'User');
+}
+
+function truncateText(value, max = 64) {
+  const text = String(value || '').trim();
+  if (text.length <= max) return text;
+  return text.slice(0, Math.max(0, max - 1)).trimEnd() + '…';
+}
+
+function avatarHue(seed) {
+  const text = String(seed || 'user');
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash % 360);
+}
+
+function commentTimeLabel(comment) {
+  return `Ch ${Number(comment.chapterIndex || 0) + 1} · ${fmt(comment.audioTimestampSeconds || 0)}`;
+}
+
+function normalizeLibraryBookMatchText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function linkedCatalogBookId(book) {
+  if (!book) return null;
+  return book.sourceCatalogId || book.catalogId || (book.isCatalog ? book.id : null);
+}
+
+function libraryBooksMatch(localBook, catalogBook) {
+  if (!localBook || !catalogBook) return false;
+  if (localBook.id === catalogBook.id) return true;
+  if (linkedCatalogBookId(localBook) === catalogBook.id) return true;
+  const localCount = localBook.chapterCount || localBook.chapters?.length || 0;
+  const catalogCount = catalogBook.chapterCount || catalogBook.chapters?.length || 0;
+  if (localCount && catalogCount && localCount !== catalogCount) return false;
+
+  const localTitle = normalizeLibraryBookMatchText(localBook.title);
+  const catalogTitle = normalizeLibraryBookMatchText(catalogBook.title);
+  if (!localTitle || !catalogTitle) return false;
+
+  const titleMatch = localTitle.includes(catalogTitle) || catalogTitle.includes(localTitle);
+  if (!titleMatch) return false;
+
+  const localAuthor = normalizeLibraryBookMatchText(localBook.author);
+  const catalogAuthor = normalizeLibraryBookMatchText(catalogBook.author);
+  if (!catalogAuthor) return true;
+  return !localAuthor || localAuthor === catalogAuthor || localTitle.includes(catalogAuthor);
+}
+
+function mergeVisibleLibraryBooks(localBooks, catalogBooks) {
+  const merged = [...localBooks];
+  for (const catalogBook of catalogBooks) {
+    const hasLocalTwin = localBooks.some(localBook => libraryBooksMatch(localBook, catalogBook));
+    if (!hasLocalTwin) merged.push(catalogBook);
+  }
+  return merged;
+}
+
+function catalogBookIsInLibrary(catalogBookId) {
+  return S.books.some(book =>
+    book?.id === catalogBookId || linkedCatalogBookId(book) === catalogBookId
+  );
+}
+
+function catalogBookHasLocalCopy(catalogBookId) {
+  return S.books.some(book =>
+    !book?.isCatalog && (book?.id === catalogBookId || linkedCatalogBookId(book) === catalogBookId)
+  );
+}
+
+function getLibraryRemovalCatalogId(book) {
+  const linkedId = linkedCatalogBookId(book);
+  if (!linkedId) return null;
+  if (book?.isCatalog) return book.id;
+  if (book?.managedFolder) return linkedId;
+  return null;
 }
 
 // ── Star rating helpers ───────────────────────────────────────────────────────
@@ -399,6 +518,7 @@ function openReaderFullscreen() {
   $('rfs-title').textContent = KARAOKE.loadedBookTitle;
   // Sync follow-along button state
   $('rfs-follow-btn').classList.toggle('active', KARAOKE.enabled);
+  renderCommentMarkers();
 
   show($('reader-fullscreen'));
   KARAOKE.isFullscreen = true;
@@ -417,6 +537,104 @@ function appendChapter(num, title, text, words) {
   KARAOKE.chapters.push({ num, title, text, words });
   _appendChapterToEl($('tp-body'), num, title, text, words);
   $('tp-body').scrollTop = $('tp-body').scrollHeight;
+  renderCommentMarkers();
+}
+
+function hasTranscriptChapter(num) {
+  return KARAOKE.chapters.some(ch => ch.num === num);
+}
+
+function appendChapterIfMissing(num, title, text, words) {
+  if (hasTranscriptChapter(num)) return;
+  appendChapter(num, title, text, words);
+}
+
+function describeTranscribeState(data) {
+  const payload = data?.payload || {};
+  const progress = data?.progress || {};
+  switch (data?.event) {
+    case 'queued':
+      return payload.reused ? 'Transcription already running…' : 'Queued for smart sync…';
+    case 'cache-hit':
+      return payload.alignmentComplete
+        ? 'Loaded transcript and alignment from cache.'
+        : 'Loaded transcript from cache.';
+    case 'transcription-start':
+      if (payload.device) {
+        return payload.device === 'cuda'
+          ? `Transcribing on GPU (${payload.computeType || 'float16'})…`
+          : `Transcribing on CPU (${payload.computeType || 'int8'})…`;
+      }
+      return 'Starting transcription…';
+    case 'model-loading':
+      return payload.message || 'Loading Whisper model…';
+    case 'transcription-progress':
+      if (payload.chapterIndex != null && payload.text) {
+        return `Transcribed chapter ${payload.chapterIndex + 1} of ${progress.total || '?'}…`;
+      }
+      if (payload.chapterIndex != null) {
+        return `Transcribing chapter ${payload.chapterIndex + 1} of ${progress.total || '?'}…`;
+      }
+      return 'Transcribing…';
+    case 'transcript-complete':
+      return 'Transcript cached. Preparing alignment…';
+    case 'alignment-start':
+      return 'Building alignment cache…';
+    case 'alignment-progress':
+      return payload.message || 'Updating alignment cache…';
+    case 'alignment-complete':
+      return payload.stub
+        ? 'Transcript ready. Alignment stub cached for future upgrades.'
+        : 'Alignment cache complete.';
+    case 'completed':
+      return payload.cacheHit ? 'Loaded from cache.' : 'Smart sync complete.';
+    case 'failed':
+      return data?.error || (payload.cancelled ? 'Transcription cancelled.' : 'Smart sync failed.');
+    default:
+      return '';
+  }
+}
+
+function handleTranscribeProgressEvent(book, data) {
+  if (!data || data.bookId !== book.id) return;
+  const payload = data.payload || {};
+
+  if (data.event === 'transcription-progress' && payload.text && payload.chapterIndex != null) {
+    const title = payload.chapterTitle || book.chapters?.[payload.chapterIndex]?.title || `Chapter ${payload.chapterIndex + 1}`;
+    appendChapterIfMissing(payload.chapterIndex + 1, title, payload.text, payload.words || null);
+  }
+
+  const isActive = !['completed', 'failed', 'cache-hit'].includes(data.event);
+  setTranscriptStatus(describeTranscribeState(data), isActive);
+}
+
+function describeLegacyTranscribeState(data) {
+  switch (data?.type) {
+    case 'model_load':
+      return 'Loading Whisper model…';
+    case 'device':
+      return data.device === 'cuda'
+        ? `Running on GPU (${data.compute_type || 'float16'})`
+        : `Running on CPU (${data.compute_type || 'int8'})`;
+    case 'chapter':
+      return `Transcribed chapter ${data.chapterIndex + 1} of ${data.total}…`;
+    default:
+      return '';
+  }
+}
+
+function handleLegacyTranscribeProgressEvent(book, data) {
+  if (!data || data.bookId !== book.id || !data.type) return;
+  if (data.type === 'chapter') {
+    appendChapterIfMissing(
+      data.chapterIndex + 1,
+      data.chapterTitle || book.chapters?.[data.chapterIndex]?.title || `Chapter ${data.chapterIndex + 1}`,
+      data.text || '',
+      data.words || null
+    );
+  }
+  const active = data.type !== 'chapter' || (data.chapterIndex + 1) < data.total;
+  setTranscriptStatus(describeLegacyTranscribeState(data), active);
 }
 
 function renderFullTranscript(fullText) {
@@ -459,6 +677,54 @@ async function loadAndShowTranscript(book) {
   return true;
 }
 
+async function runContextMenuTranscription(book, { force = false } = {}) {
+  openTranscriptPanel(book);
+
+  if (!force) {
+    const transcriptState = await api.transcriptExists(book.id);
+    if (transcriptState?.exists) {
+      const loaded = await loadAndShowTranscript(book);
+      if (!loaded) {
+        setTranscriptStatus('Transcript exists on disk but could not be loaded.', false);
+        return { error: 'Transcript exists on disk but could not be loaded.' };
+      }
+      setTranscriptStatus(
+        transcriptState.source === 'legacy' ? 'Loaded transcript from disk.' : 'Loaded transcript from cache.',
+        false
+      );
+      S.ctxTranscript = true;
+      return { cacheHit: true };
+    }
+  }
+
+  openTranscriptPanel(book);
+  setTranscriptStatus(
+    `Starting transcription of ${book.chapterCount || book.chapters.length} chapter${(book.chapterCount || book.chapters.length) !== 1 ? 's' : ''}…`,
+    true
+  );
+
+  const unsubscribe = api.onTranscribeProgress((data) => handleLegacyTranscribeProgressEvent(book, data));
+  try {
+    const result = await (force ? api.retranscribe(book.id) : api.transcribe(book.id));
+    unsubscribe?.();
+
+    if (result?.error) {
+      setTranscriptStatus('Error: ' + result.error, false);
+      return result;
+    }
+
+    await loadAndShowTranscript(book);
+    setTranscriptStatus('Transcription complete', false);
+    S.ctxTranscript = result;
+    return result;
+  } catch (error) {
+    unsubscribe?.();
+    const message = error?.message || String(error);
+    setTranscriptStatus('Error: ' + message, false);
+    return { error: message };
+  }
+}
+
 async function toggleTranscriptPanel() {
   if ($('transcript-panel').classList.contains('open')) {
     closeTranscriptPanel();
@@ -475,7 +741,18 @@ async function toggleTranscriptPanel() {
     return;
   }
 
-  await loadAndShowTranscript(book);
+  if (await loadAndShowTranscript(book)) return;
+
+  const job = await api.getTranscribeJob(book.id);
+  if (job && (job.status === 'queued' || job.status === 'running')) {
+    openTranscriptPanel(book);
+    setTranscriptStatus(describeTranscribeState({
+      event: job.status === 'queued' ? 'queued' : `${job.stage}-start`,
+      stage: job.stage,
+      progress: job.progress,
+      payload: {},
+    }), true);
+  }
 }
 
 function setTranscriptStatus(msg, active = false) {
@@ -484,13 +761,121 @@ function setTranscriptStatus(msg, active = false) {
   el.classList.toggle('active', active);
 }
 
+function smartSyncButtonState(bookId) {
+  return SMART_SYNC_UI.byBookId[String(bookId)] || { status: 'idle' };
+}
+
+function setSmartSyncButtonStatus(bookId, status, label = '') {
+  SMART_SYNC_UI.byBookId[String(bookId)] = { status, label };
+  updateSmartSyncButton();
+}
+
+function ensureSmartSyncProgressListener() {
+  if (SMART_SYNC_UI.progressListenerAttached) return;
+  SMART_SYNC_UI.progressListenerAttached = true;
+  api.onTranscribeProgress((data) => {
+    const activeBook = data?.bookId === S.currentBook?.id
+      ? S.currentBook
+      : S.books.find(b => b.id === data?.bookId) || null;
+
+    if (activeBook) {
+      handleTranscribeProgressEvent(activeBook, data);
+    }
+
+    if (!data?.bookId) return;
+    const trackedBookId = String(data.bookId);
+    if (data.event === 'queued' || data.event === 'transcription-start' || data.event === 'model-loading'
+      || data.event === 'transcription-progress' || data.event === 'alignment-start' || data.event === 'alignment-progress') {
+      SMART_SYNC_UI.startingBookIds.add(trackedBookId);
+      setSmartSyncButtonStatus(trackedBookId, 'running', 'Generating...');
+    } else if (data.event === 'cache-hit' || data.event === 'completed') {
+      SMART_SYNC_UI.startingBookIds.delete(trackedBookId);
+      setSmartSyncButtonStatus(trackedBookId, 'completed', 'Completed');
+    } else if (data.event === 'failed') {
+      SMART_SYNC_UI.startingBookIds.delete(trackedBookId);
+      setSmartSyncButtonStatus(trackedBookId, 'idle', 'Generate Smart Sync');
+    }
+  });
+}
+
+async function refreshSmartSyncButton() {
+  const book = S.currentBook;
+  const refreshToken = ++SMART_SYNC_UI.refreshToken;
+  if (!book) {
+    updateSmartSyncButton();
+    return;
+  }
+  const job = await api.getTranscribeJob(book.id);
+  if (refreshToken !== SMART_SYNC_UI.refreshToken || S.currentBook?.id !== book.id) {
+    return;
+  }
+  if (SMART_SYNC_UI.startingBookIds.has(String(book.id))) {
+    updateSmartSyncButton();
+    return;
+  }
+  if (job && (job.status === 'queued' || job.status === 'running')) {
+    setSmartSyncButtonStatus(book.id, 'running', 'Generating...');
+  } else if (smartSyncButtonState(book.id).status === 'running') {
+    setSmartSyncButtonStatus(book.id, 'idle', 'Generate Smart Sync');
+  } else {
+    updateSmartSyncButton();
+  }
+}
+
+function updateSmartSyncButton() {
+  const btn = $('btn-smart-sync');
+  const book = S.currentBook;
+  if (!btn) return;
+  if (!book) {
+    btn.disabled = true;
+    btn.textContent = 'Generate Smart Sync';
+    return;
+  }
+  const state = smartSyncButtonState(book.id);
+  btn.disabled = state.status === 'running';
+  btn.textContent =
+    state.label ||
+    (state.status === 'running' ? 'Generating...' :
+     state.status === 'completed' ? 'Completed' :
+     'Generate Smart Sync');
+}
+
+async function startSmartSyncForBook(book) {
+  if (!book) return;
+  const bookId = String(book.id);
+  SMART_SYNC_UI.startingBookIds.add(bookId);
+  setSmartSyncButtonStatus(book.id, 'running', 'Generating...');
+  ensureSmartSyncProgressListener();
+
+  try {
+    const result = await api.book.transcribe(book.id);
+
+    if (result?.error) {
+      SMART_SYNC_UI.startingBookIds.delete(bookId);
+      setSmartSyncButtonStatus(book.id, 'idle', 'Generate Smart Sync');
+      setTranscriptStatus('Error: ' + result.error, false);
+      showPlayerMessage('Smart sync failed: ' + result.error, true);
+      return result;
+    }
+
+    SMART_SYNC_UI.startingBookIds.delete(bookId);
+    setSmartSyncButtonStatus(book.id, 'completed', 'Completed');
+    return result;
+  } catch (error) {
+    SMART_SYNC_UI.startingBookIds.delete(bookId);
+    setSmartSyncButtonStatus(book.id, 'idle', 'Generate Smart Sync');
+    setTranscriptStatus('Error: ' + (error?.message || String(error)), false);
+    showPlayerMessage('Smart sync failed.', true);
+    return { error: error?.message || String(error) };
+  }
+}
+
 // ── View switching ───────────────────────────────────────────────────────────
 function showView(name) {
   S.view = name;
   toggle($('library-view'),  name === 'library');
   toggle($('player-view'),   name === 'player');
-  toggle($('chapter-sidebar'),   name === 'player');
-  toggle($('bookmarks-sidebar'), name === 'player');
+  setPlayerSidebarVisibility();
   toggle($('catalog-view'),  name === 'catalog');
 
   $('nav-library').classList.toggle('active', name === 'library');
@@ -504,9 +889,11 @@ function showView(name) {
 // ── Library ──────────────────────────────────────────────────────────────────
 async function loadLibrary() {
   if (authUser) {
-    // Logged in: only show this user's catalog books from Supabase
-    const catRes = await api.catalog.getUserLibrary();
-    S.books = catRes.books || [];
+    const [catRes, localBooks] = await Promise.all([
+      api.catalog.getUserLibrary(),
+      api.getLibrary(),
+    ]);
+    S.books = mergeVisibleLibraryBooks(localBooks || [], catRes.books || []);
   } else {
     // No account: show local books only
     S.books = await api.getLibrary();
@@ -634,6 +1021,12 @@ async function openBook(bookId) {
   updatePlayerBarInfo();
   showView('player');
   updateNowPlayingDisplay();
+  refreshSmartSyncButton();
+  clearCommentNotificationState();
+  closeCommentComposer();
+  hideEpubSelectionPopup();
+  resetCommentPlaybackState(pb?.position || 0, S.chapterIndex);
+  refreshCurrentBookComments();
 
   playChapter(S.chapterIndex, pb?.position || 0);
 }
@@ -663,6 +1056,12 @@ async function openCatalogBook(book) {
   updatePlayerBarInfo();
   showView('player');
   updateNowPlayingDisplay();
+  refreshSmartSyncButton();
+  clearCommentNotificationState();
+  closeCommentComposer();
+  hideEpubSelectionPopup();
+  resetCommentPlaybackState(pb?.position || 0, S.chapterIndex);
+  refreshCurrentBookComments();
   playChapter(S.chapterIndex, pb?.position || 0);
 }
 
@@ -718,6 +1117,7 @@ async function playChapter(index, startPos = 0) {
     if (startPos > 0 && startPos < audio.duration - 1) {
       audio.currentTime = startPos;
     }
+    resetCommentPlaybackState(audio.currentTime || startPos || 0, index);
     audio.play().catch(err => console.error('Play error:', err));
 
     // Persist chapter duration for progress accuracy (local books only)
@@ -756,14 +1156,22 @@ function togglePlay() {
   }
 }
 
+function seekToTime(position) {
+  const upperBound = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Math.max(0, position);
+  const nextTime = Math.max(0, Math.min(upperBound, position));
+  audio.currentTime = nextTime;
+  resetCommentPlaybackState(nextTime, S.chapterIndex);
+  updateSeekBar();
+}
+
 function skip(secs) {
   if (!audio.src) return;
-  audio.currentTime = Math.max(0, Math.min(audio.duration || 0, audio.currentTime + secs));
+  seekToTime((audio.currentTime || 0) + secs);
 }
 
 function prevChapter() {
   if (!S.currentBook) return;
-  if (audio.currentTime > 3) { audio.currentTime = 0; return; }
+  if (audio.currentTime > 3) { seekToTime(0); return; }
   if (S.chapterIndex > 0) playChapter(S.chapterIndex - 1);
 }
 
@@ -835,6 +1243,7 @@ function updateNowPlayingDisplay() {
   $('now-chapter').textContent = chapterLabel;
 
   renderNowStars(book.rating || 0);
+  updateSmartSyncButton();
 }
 
 function updatePlayerBarInfo() {
@@ -860,6 +1269,7 @@ function updatePlayerBarInfo() {
     : '';
 
   show($('player-bar'));
+  updateEpubButton();
 }
 
 function updatePlayButton(playing) {
@@ -883,6 +1293,7 @@ function updateSeekBar() {
   $('pb-total').textContent = fmt(audio.duration);
   $('ch-current').textContent = fmt(audio.currentTime);
   $('ch-total').textContent = fmt(audio.duration);
+  renderSeekBarCommentDots();
 }
 
 function updateChapterListHighlight() {
@@ -929,8 +1340,7 @@ function doSeek(e, track) {
   if (!audio.duration) return;
   const rect = track.getBoundingClientRect();
   const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-  audio.currentTime = ratio * audio.duration;
-  updateSeekBar();
+  seekToTime(ratio * audio.duration);
 }
 
 // ── Chapter list ─────────────────────────────────────────────────────────────
@@ -978,7 +1388,7 @@ function renderBookmarks() {
         if (bm.chapterIndex !== S.chapterIndex) {
           playChapter(bm.chapterIndex, bm.position);
         } else {
-          audio.currentTime = bm.position;
+          seekToTime(bm.position);
         }
       }
     });
@@ -1127,6 +1537,449 @@ function showToast(msg, isError = false) {
   _toastTimer = setTimeout(() => t.classList.add('hidden'), 3500);
 }
 
+function firstPresentValue(source, keys) {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (value != null && String(value).trim()) return String(value).trim();
+  }
+  return '';
+}
+
+function formatCommentToastContext(comment) {
+  const pieces = [];
+  const chapterIndex = Number(comment?.chapterIndex);
+  if (Number.isFinite(chapterIndex) && chapterIndex >= 0) pieces.push(`Ch ${chapterIndex + 1}`);
+  const timestamp = Number(comment?.audioTimestampSeconds);
+  if (Number.isFinite(timestamp) && timestamp >= 0) pieces.push(fmt(timestamp));
+  return pieces.join(' · ');
+}
+
+function normalizeCommentToastData(comment) {
+  const username = firstPresentValue(comment, [
+    'displayName',
+    'display_name',
+    'username',
+    'userName',
+    'name',
+    'author',
+  ]) || 'User';
+  const text = firstPresentValue(comment, [
+    'comment_text',
+    'commentText',
+    'text',
+    'content',
+    'body',
+    'comment',
+  ]);
+  return {
+    username,
+    text,
+    context: formatCommentToastContext(comment),
+  };
+}
+
+function flushCommentToast() {
+  const toast = $('comment-toast');
+  if (!toast) return;
+  clearTimeout(COMMENTS.toastShowTimer);
+  clearTimeout(COMMENTS.toastHideTimer);
+  COMMENTS.activeToast = null;
+  if (COMMENTS.toastQueue.length) {
+    COMMENTS.toastShowTimer = setTimeout(showNextCommentToast, 120);
+  } else {
+    toast.classList.add('hidden');
+  }
+}
+
+function showNextCommentToast() {
+  const toast = $('comment-toast');
+  if (!toast || COMMENTS.activeToast || !COMMENTS.toastQueue.length) return;
+
+  const next = COMMENTS.toastQueue.shift();
+  COMMENTS.activeToast = next;
+  $('comment-toast-user').textContent = `${next.username}:`;
+  $('comment-toast-message').textContent = next.text;
+  const contextEl = $('comment-toast-context');
+  contextEl.textContent = next.context;
+  contextEl.classList.toggle('hidden', !next.context);
+
+  toast.classList.remove('hidden');
+  clearTimeout(COMMENTS.toastShowTimer);
+  clearTimeout(COMMENTS.toastHideTimer);
+  COMMENTS.toastShowTimer = setTimeout(() => {
+    toast.classList.add('hidden');
+    COMMENTS.toastHideTimer = setTimeout(flushCommentToast, 280);
+  }, 3000);
+}
+
+function enqueueCommentToast(comment) {
+  const normalized = normalizeCommentToastData(comment);
+  if (!normalized.text) return;
+  COMMENTS.toastQueue.push(normalized);
+  if (!COMMENTS.activeToast) showNextCommentToast();
+  api.comments.notifyReached({
+    commentId: comment.id,
+    username: comment.username || 'Unknown',
+    text: comment.text || '',
+    chapterIndex: comment.chapterIndex,
+    audioTimestampSeconds: comment.audioTimestampSeconds,
+  });
+}
+
+function escapeAttr(value) {
+  return escHtml(value).replace(/"/g, '&quot;');
+}
+
+function getCurrentBookComments() {
+  return COMMENTS.byBookId[String(S.currentBook?.id || '')] || [];
+}
+
+function findCommentById(commentId) {
+  return getCurrentBookComments().find(comment => String(comment.id) === String(commentId)) || null;
+}
+
+function sortComments(comments) {
+  return [...comments].sort((a, b) =>
+    (a.chapterIndex - b.chapterIndex)
+    || ((a.audioTimestampSeconds || 0) - (b.audioTimestampSeconds || 0))
+    || String(a.createdAt || '').localeCompare(String(b.createdAt || ''))
+  );
+}
+
+function setCurrentBookComments(comments) {
+  if (!S.currentBook) return;
+  COMMENTS.byBookId[String(S.currentBook.id)] = sortComments(comments || []);
+}
+
+
+function clearCommentNotificationState() {
+  COMMENTS.triggeredIds.clear();
+  COMMENTS.toastQueue = [];
+  COMMENTS.activeToast = null;
+  clearTimeout(COMMENTS.toastShowTimer);
+  clearTimeout(COMMENTS.toastHideTimer);
+  $('comment-toast')?.classList.add('hidden');
+}
+
+function resetCommentPlaybackState(playbackTime = audio.currentTime || 0, chapterIndex = S.chapterIndex || 0) {
+  COMMENTS.triggeredIds.clear();
+  COMMENTS.lastBookId = String(S.currentBook?.id || '');
+  COMMENTS.lastChapterIndex = chapterIndex;
+  COMMENTS.lastPlaybackTime = playbackTime;
+  for (const comment of getCurrentBookComments()) {
+    if (comment.chapterIndex !== chapterIndex) continue;
+    if ((comment.audioTimestampSeconds || 0) < Math.max(0, playbackTime - 0.35)) {
+      COMMENTS.triggeredIds.add(String(comment.id));
+    }
+  }
+}
+
+function closeCommentComposer() {
+  COMMENTS.composerContext = null;
+  $('comment-drop-input').value = '';
+  hide($('comment-drop-popup'));
+}
+
+
+function hideEpubSelectionPopup() {
+  COMMENTS.epubSelection = null;
+  hide($('epub-selection-popup'));
+}
+
+function positionFloatingPopup(popup, anchorEl, { x = window.innerWidth - 360, y = window.innerHeight - 220 } = {}) {
+  const rect = anchorEl?.getBoundingClientRect?.();
+  const width = popup.offsetWidth || popup.getBoundingClientRect().width || 320;
+  const height = popup.offsetHeight || popup.getBoundingClientRect().height || 200;
+  const left = rect
+    ? Math.min(window.innerWidth - width - 12, Math.max(12, rect.left + rect.width / 2 - width / 2))
+    : Math.min(window.innerWidth - width - 12, Math.max(12, x));
+  const top = rect
+    ? Math.min(window.innerHeight - height - 12, Math.max(12, rect.bottom + 10))
+    : Math.min(window.innerHeight - height - 12, Math.max(12, y));
+  popup.style.left = `${left}px`;
+  popup.style.top = `${top}px`;
+}
+
+
+function enqueueTimedComments() {
+  if (!S.currentBook) return;
+  const currentBookId = String(S.currentBook.id);
+  const currentTime = audio.currentTime || 0;
+  const lastTime = COMMENTS.lastPlaybackTime || 0;
+  const playbackJumped = Math.abs(currentTime - lastTime) > 2;
+  if (COMMENTS.lastBookId !== currentBookId
+    || COMMENTS.lastChapterIndex !== S.chapterIndex
+    || currentTime + 1 < lastTime
+    || playbackJumped) {
+    resetCommentPlaybackState(currentTime, S.chapterIndex);
+    return;
+  }
+
+  for (const comment of getCurrentBookComments()) {
+    if (comment.chapterIndex !== S.chapterIndex) continue;
+    if (comment.userId === authUser?.id) continue;
+    const key = String(comment.id);
+    if (COMMENTS.triggeredIds.has(key)) continue;
+    const timestamp = comment.audioTimestampSeconds || 0;
+    if (timestamp > lastTime - 0.1 && timestamp <= currentTime + 0.35) {
+      COMMENTS.triggeredIds.add(key);
+      enqueueCommentToast(comment);
+    }
+  }
+
+  COMMENTS.lastBookId = currentBookId;
+  COMMENTS.lastChapterIndex = S.chapterIndex;
+  COMMENTS.lastPlaybackTime = currentTime;
+}
+
+
+function collectTranscriptWordEntries(container, chapterIndex) {
+  return Array.from(container.querySelectorAll(`.tp-word[data-chapter="${chapterIndex}"]`)).map(span => ({
+    span,
+    start: parseFloat(span.dataset.start) || 0,
+    end: parseFloat(span.dataset.end) || 0,
+  }));
+}
+
+function findClosestTranscriptWord(entries, timestamp) {
+  if (!entries.length) return null;
+  let best = entries[0];
+  let bestDistance = Math.abs((best.start || 0) - timestamp);
+  for (const entry of entries) {
+    if (timestamp >= entry.start && timestamp <= entry.end) return entry;
+    const distance = Math.min(
+      Math.abs((entry.start || 0) - timestamp),
+      Math.abs((entry.end || entry.start || 0) - timestamp)
+    );
+    if (distance < bestDistance) {
+      best = entry;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function renderTranscriptMarkersIn(container) {
+  container.querySelectorAll('.tp-comment-marker-wrap').forEach(node => node.remove());
+  const comments = getCurrentBookComments();
+  if (!comments.length) return;
+
+  const commentsByChapter = new Map();
+  for (const comment of comments) {
+    if (!commentsByChapter.has(comment.chapterIndex)) commentsByChapter.set(comment.chapterIndex, []);
+    commentsByChapter.get(comment.chapterIndex).push(comment);
+  }
+
+  for (const [chapterIndex, chapterComments] of commentsByChapter) {
+    const entries = collectTranscriptWordEntries(container, chapterIndex);
+    if (!entries.length) continue;
+
+    const groups = new Map();
+    for (const comment of chapterComments) {
+      const target = findClosestTranscriptWord(entries, comment.audioTimestampSeconds || 0);
+      if (!target) continue;
+      const key = `${target.start}:${target.end}`;
+      if (!groups.has(key)) groups.set(key, { target: target.span, comments: [] });
+      groups.get(key).comments.push(comment);
+    }
+
+    for (const group of groups.values()) {
+      const wrap = document.createElement('span');
+      wrap.className = 'tp-comment-marker-wrap';
+      for (const comment of group.comments.slice(0, 5)) {
+        const btn = document.createElement('button');
+        btn.className = 'tp-comment-marker';
+        btn.title = `${comment.username}: ${comment.text}`;
+        btn.style.background = `hsl(${avatarHue(comment.username)},72%,40%)`;
+        btn.textContent = (comment.username || 'U')[0]?.toUpperCase() || 'U';
+        attachCommentDeleteMenu(btn, comment.id);
+        wrap.appendChild(btn);
+      }
+      group.target.insertAdjacentElement('afterend', wrap);
+    }
+  }
+}
+
+function decorateEpubParagraph(text, chapterIndex, paragraphIndex) {
+  const matches = [];
+  const lower = String(text || '').toLowerCase();
+  for (const comment of getCurrentBookComments()) {
+    const selectedText = String(comment.selectedText || '').trim();
+    if (!selectedText) continue;
+    const explicitChapter = Number.isFinite(comment.epubChapterIndex) ? comment.epubChapterIndex : null;
+    const explicitParagraph = Number.isFinite(comment.epubParagraphIndex) ? comment.epubParagraphIndex : null;
+    if (explicitChapter != null && explicitChapter !== chapterIndex) continue;
+    if (explicitParagraph != null && explicitParagraph !== paragraphIndex) continue;
+    if (explicitChapter == null && EPUB.chapters[chapterIndex]?.syncIndex !== comment.chapterIndex) continue;
+
+    const start = lower.indexOf(selectedText.toLowerCase());
+    if (start < 0) continue;
+    matches.push({
+      start,
+      end: start + selectedText.length,
+      comment,
+    });
+  }
+
+  if (!matches.length) return escHtml(text);
+
+  matches.sort((a, b) => a.start - b.start || a.end - b.end);
+  let html = '';
+  let cursor = 0;
+  for (const match of matches) {
+    if (match.start < cursor) continue;
+    html += escHtml(text.slice(cursor, match.start));
+    html += `<button class="epub-comment-underline" title="${escapeAttr(`${match.comment.username || 'User'}: ${match.comment.text || ''}`)}">${escHtml(text.slice(match.start, match.end))}</button>`;
+    cursor = match.end;
+  }
+  html += escHtml(text.slice(cursor));
+  return html;
+}
+
+function renderEpubCommentDecorations() {
+  const textEl = $('epub-text');
+  if (!textEl || !EPUB.chapters.length) return;
+
+  textEl.querySelectorAll('.epub-para').forEach(paraEl => {
+    const chapterIndex = parseInt(paraEl.dataset.chapter, 10);
+    const paragraphIndex = parseInt(paraEl.dataset.idx, 10);
+    const text = EPUB.chapters[chapterIndex]?.paragraphs?.[paragraphIndex] || '';
+    paraEl.innerHTML = decorateEpubParagraph(text, chapterIndex, paragraphIndex);
+  });
+
+}
+
+async function deleteComment(commentId) {
+  const result = await api.comments.delete({ commentId });
+  if (result.error) { showToast(result.error, true); return false; }
+  setCurrentBookComments(getCurrentBookComments().filter(c => String(c.id) !== String(commentId)));
+  renderCommentMarkers();
+  return true;
+}
+
+function attachCommentDeleteMenu(el, commentId) {
+  el.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (window.confirm('Delete this comment?')) deleteComment(commentId);
+  });
+}
+
+function renderSeekBarCommentDots() {
+  const track = $('pb-seek-track');
+  if (!track || !audio.duration) return;
+  track.querySelectorAll('.seek-comment-dot').forEach(d => d.remove());
+  const comments = getCurrentBookComments().filter(c => c.chapterIndex === S.chapterIndex && c.audioTimestampSeconds > 0);
+  for (const comment of comments) {
+    const pct = (comment.audioTimestampSeconds / audio.duration) * 100;
+    if (pct < 0 || pct > 100) continue;
+    const dot = document.createElement('button');
+    dot.className = 'seek-comment-dot';
+    dot.style.left = pct + '%';
+    dot.title = `${comment.username || 'User'}: ${comment.text}`;
+    attachCommentDeleteMenu(dot, comment.id);
+    track.appendChild(dot);
+  }
+}
+
+function renderCommentMarkers() {
+  if ($('tp-body').children.length) renderTranscriptMarkersIn($('tp-body'));
+  if ($('rfs-body').children.length) renderTranscriptMarkersIn($('rfs-body'));
+  renderEpubCommentDecorations();
+  renderSeekBarCommentDots();
+}
+
+async function refreshCurrentBookComments() {
+  if (!authUser || !S.currentBook) return;
+  const token = ++COMMENTS.requestToken;
+  const bookId = String(S.currentBook.id);
+  const result = await api.comments.getBook({ bookId });
+  if (token !== COMMENTS.requestToken || String(S.currentBook?.id || '') !== bookId) return;
+  if (result.error) {
+    console.warn('Comment refresh failed:', result.error);
+    return;
+  }
+  setCurrentBookComments(result.comments || []);
+  resetCommentPlaybackState();
+  renderCommentMarkers();
+}
+
+function ensureCommentPolling() {
+  clearInterval(COMMENTS.pollTimer);
+  COMMENTS.pollTimer = setInterval(() => {
+    if (S.currentBook && authUser) refreshCurrentBookComments();
+  }, 15000);
+}
+
+function openCommentComposer(context = {}) {
+  if (!S.currentBook || !authUser) return;
+  COMMENTS.composerContext = {
+    bookId: S.currentBook.id,
+    chapterIndex: S.chapterIndex,
+    audioTimestampSeconds: Number((audio.currentTime || 0).toFixed(3)),
+    selectedText: context.selectedText || null,
+    epubChapterIndex: context.epubChapterIndex ?? null,
+    epubParagraphIndex: context.epubParagraphIndex ?? null,
+  };
+  $('comment-drop-input').value = '';
+  show($('comment-drop-popup'));
+  $('comment-drop-input').focus();
+}
+
+async function submitCommentComposer() {
+  const text = $('comment-drop-input').value.trim();
+  if (!text || !COMMENTS.composerContext) return;
+  const result = await api.comments.create({
+    ...COMMENTS.composerContext,
+    chapterIndex: S.chapterIndex,
+    audioTimestampSeconds: Number((audio.currentTime || 0).toFixed(3)),
+    text,
+  });
+  if (result.error) {
+    showToast(result.error, true);
+    return;
+  }
+  setCurrentBookComments([...getCurrentBookComments(), result.comment]);
+  renderCommentMarkers();
+  closeCommentComposer();
+  showToast('Comment saved.');
+  refreshCurrentBookComments();
+}
+
+function updateEpubSelectionFromRange() {
+  if (!EPUB.isOpen) return;
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) {
+    hideEpubSelectionPopup();
+    return;
+  }
+  const range = selection.getRangeAt(0);
+  if (!$('epub-text').contains(range.commonAncestorContainer)) {
+    hideEpubSelectionPopup();
+    return;
+  }
+  const text = selection.toString().replace(/\s+/g, ' ').trim();
+  const startNode = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+  const paraEl = startNode?.closest('.epub-para');
+  const sectionEl = startNode?.closest('.epub-section');
+  if (!text || !paraEl || !sectionEl) {
+    hideEpubSelectionPopup();
+    return;
+  }
+
+  COMMENTS.epubSelection = {
+    text,
+    chapterIndex: parseInt(sectionEl.dataset.chapter, 10),
+    paragraphIndex: parseInt(paraEl.dataset.idx, 10),
+  };
+  const popup = $('epub-selection-popup');
+  show(popup);
+  positionFloatingPopup(popup, null, {
+    x: range.getBoundingClientRect().left,
+    y: range.getBoundingClientRect().bottom + 12,
+  });
+}
+
 // ── Confirm dialog ────────────────────────────────────────────────────────────
 let _confirmResolve = null;
 function showConfirmDialog(title, body) {
@@ -1156,23 +2009,81 @@ function _confirmSetup() {
 
 // ── EPUB Reader ───────────────────────────────────────────────────────────────
 
-function epubChapterForAudio(audioIdx, totalAudio, totalEpub) {
-  if (!totalEpub) return 0;
-  if (totalAudio <= 1) return 0;
-  return Math.min(Math.floor(audioIdx * totalEpub / totalAudio), totalEpub - 1);
-}
 
 function updateEpubButton() {
   const book = S.currentBook;
   const hasEpub = !!(book?.hasEpub || book?.epubPath);
   toggle($('btn-epub'), hasEpub);
+  toggle($('btn-epub-open'), hasEpub);
   $('btn-epub').classList.toggle('epub-active', hasEpub && EPUB.isOpen);
+  $('btn-epub-open').classList.toggle('epub-active', hasEpub && EPUB.isOpen);
+  $('btn-epub-open').textContent = EPUB.isOpen ? 'Close EPUB' : 'Open EPUB';
+}
+
+function setPlayerSidebarVisibility() {
+  const showPanels = S.view === 'player' && (!EPUB.isOpen || EPUB.audioPanelsOpen);
+  toggle($('chapter-sidebar'), showPanels);
+  toggle($('bookmarks-sidebar'), showPanels);
+}
+
+function applyEpubLayoutState() {
+  document.body.classList.toggle('epub-hide-app-sidebar', EPUB.isOpen && !EPUB.appSidebarOpen);
+  document.body.classList.toggle('epub-hide-audio-panels', EPUB.isOpen && !EPUB.audioPanelsOpen);
+  document.body.classList.toggle('epub-focus-mode', EPUB.isOpen && EPUB.readerOnly);
+  $('epub-toc').classList.toggle('hidden', !EPUB.tocOpen);
+  $('epub-app-sidebar-btn').classList.toggle('active', EPUB.appSidebarOpen);
+  $('epub-audio-panels-btn').classList.toggle('active', EPUB.audioPanelsOpen);
+  $('epub-toc-btn').classList.toggle('active', EPUB.tocOpen);
+  $('epub-reader-mode-btn').classList.toggle('active', EPUB.readerOnly);
+  setPlayerSidebarVisibility();
+}
+
+function setReaderOnlyMode(on) {
+  EPUB.readerOnly = !!on;
+  if (EPUB.readerOnly) {
+    EPUB.appSidebarOpen = false;
+    EPUB.audioPanelsOpen = false;
+    EPUB.tocOpen = false;
+  } else {
+    EPUB.appSidebarOpen = true;
+    EPUB.audioPanelsOpen = true;
+    EPUB.tocOpen = true;
+  }
+  applyEpubLayoutState();
+}
+
+function normalizeEpubChapterTitle(rawTitle, bookTitle, index, paragraphs = []) {
+  const collapse = s => String(s || '').replace(/\s+/g, ' ').trim();
+  const normalize = s => collapse(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const looksLikeFileName = s => /\.(xhtml|html|htm|opf|ncx)$/i.test(s || '');
+  const looksLikeGarbage = s => {
+    const c = collapse(s);
+    if (!c) return true;
+    if (looksLikeFileName(c)) return true;
+    if (normalize(c) === normalize(bookTitle)) return true;
+    if (bookTitle && normalize(c).startsWith(normalize(bookTitle)) && c.length > Math.max(bookTitle.length + 18, 44)) return true;
+    if (c.length > 90 && !/^ch(?:apter)?\.?\s*\d+/i.test(c)) return true;
+    if (/^(untitled|toc|contents?|section|part)$/i.test(c)) return true;
+    return false;
+  };
+
+  const candidates = [
+    rawTitle,
+    paragraphs[0],
+    paragraphs.find(p => /^ch(?:apter)?\.?\s*\d+/i.test(collapse(p))),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const clean = cleanChapterTitle(collapse(candidate), bookTitle, index);
+    if (!looksLikeGarbage(clean) && clean.length <= 80) return clean;
+  }
+
+  return `Chapter ${index + 1}`;
 }
 
 function applyEpubReaderSettings() {
   const s = EPUB.settings;
   const reader = $('epub-reader');
-  const scroll = $('epub-scroll');
   const text = $('epub-text');
   if (!reader || !text) return;
 
@@ -1185,10 +2096,27 @@ function applyEpubReaderSettings() {
   reader.style.setProperty('--epub-margin-h',      s.marginH + 'px');
   reader.style.setProperty('--epub-align',         s.textAlign);
   reader.style.setProperty('--epub-hyphens',       s.hyphenation ? 'auto' : 'manual');
-  reader.style.setProperty('--epub-col-width',     EPUB_COLUMN_WIDTHS[s.columnWidth] + 'px');
+  const colWidth = EPUB_COLUMN_WIDTHS[s.columnWidth];
+  reader.style.setProperty('--epub-col-width',     colWidth > 0 ? colWidth + 'px' : '100%');
   reader.style.background = s.bgColor;
   text.style.color = s.textColor;
 }
+
+function currentEpubScrollFraction() {
+  const scroll = $('epub-scroll');
+  if (!scroll) return 0;
+  const current = EPUB.sectionEls[EPUB.currentChapter];
+  if (!current) {
+    const max = scroll.scrollHeight - scroll.clientHeight;
+    return max > 0 ? Math.max(0, Math.min(1, scroll.scrollTop / max)) : 0;
+  }
+  const currentTop = current.offsetTop;
+  const nextTop = EPUB.sectionEls[EPUB.currentChapter + 1]?.offsetTop ?? scroll.scrollHeight;
+  const span = Math.max(1, nextTop - currentTop);
+  const anchor = scroll.scrollTop + Math.min(scroll.clientHeight * 0.28, 180);
+  return Math.max(0, Math.min(1, (anchor - currentTop) / span));
+}
+
 
 function renderEpubChapter(chapterIdx, restoreScroll = true) {
   if (!EPUB.chapters.length) return;
@@ -1201,17 +2129,6 @@ function renderEpubChapter(chapterIdx, restoreScroll = true) {
   text.innerHTML = chapter.paragraphs.map((para, i) =>
     `<p class="epub-para" data-idx="${i}">${escHtml(para)}</p>`
   ).join('');
-
-  // Paragraph click → seek audio to approximate position in chapter
-  text.querySelectorAll('.epub-para').forEach((el, i) => {
-    el.addEventListener('click', () => {
-      const fraction = i / Math.max(chapter.paragraphs.length - 1, 1);
-      if (audio.duration) {
-        audio.currentTime = audio.duration * fraction;
-        if (audio.paused) audio.play().catch(() => {});
-      }
-    });
-  });
 
   // Update TOC highlight
   $('epub-toc-list').querySelectorAll('.epub-toc-item').forEach((el, i) => {
@@ -1238,11 +2155,96 @@ function renderEpubChapter(chapterIdx, restoreScroll = true) {
   updateEpubTimeEstimate();
 }
 
-function updateEpubProgress() {
+function setActiveEpubChapter(chapterIdx, { updateScroll = false } = {}) {
+  if (!EPUB.chapters.length) return;
+  chapterIdx = Math.max(0, Math.min(chapterIdx, EPUB.chapters.length - 1));
+  EPUB.currentChapter = chapterIdx;
+  const chapter = EPUB.chapters[chapterIdx];
+
+  $('epub-toc-list').querySelectorAll('.epub-toc-item').forEach((el, i) => {
+    el.classList.toggle('active', i === chapterIdx);
+    if (updateScroll && i === chapterIdx) {
+      el.scrollIntoView({ block: 'nearest', behavior: EPUB.currentScrollSource === 'user' ? 'auto' : 'smooth' });
+    }
+  });
+
+  $('epub-text').querySelectorAll('.epub-section').forEach((el, i) => {
+    el.classList.toggle('active', i === chapterIdx);
+  });
+
+  if (S.currentBook) {
+    $('epub-hdr-book').textContent = S.currentBook.title;
+    $('epub-hdr-chapter').textContent = chapter.title || `Chapter ${chapterIdx + 1}`;
+  }
+
+  updateEpubProgress();
+  updateEpubTimeEstimate();
+}
+
+function scrollToEpubChapter(chapterIdx, { restoreScroll = false, behavior = 'smooth', source = 'nav' } = {}) {
+  if (!EPUB.chapters.length) return;
+  chapterIdx = Math.max(0, Math.min(chapterIdx, EPUB.chapters.length - 1));
+  const scroll = $('epub-scroll');
+  const section = EPUB.sectionEls[chapterIdx];
+  if (!scroll || !section) {
+    renderEpubChapter(chapterIdx, restoreScroll);
+    return;
+  }
+
+  EPUB.currentScrollSource = source;
+  EPUB.scrollReleaseAt = Date.now() + (behavior === 'smooth' ? 500 : 120);
+  const savedTop = EPUB.readingPos[String(chapterIdx)];
+  const top = restoreScroll && savedTop != null ? savedTop : Math.max(0, section.offsetTop - 8);
+  scroll.scrollTo({ top, behavior });
+  setActiveEpubChapter(chapterIdx, { updateScroll: true });
+}
+
+function detectActiveEpubChapterFromScroll() {
+  if (!EPUB.isOpen || !EPUB.sectionEls.length) return;
   const scroll = $('epub-scroll');
   if (!scroll) return;
-  const max = scroll.scrollHeight - scroll.clientHeight;
-  const pct = max > 0 ? (scroll.scrollTop / max) * 100 : 0;
+  const anchor = scroll.scrollTop + Math.min(scroll.clientHeight * 0.28, 180);
+  let activeIdx = 0;
+  for (let i = EPUB.sectionEls.length - 1; i >= 0; i--) {
+    if (EPUB.sectionEls[i].offsetTop <= anchor) {
+      activeIdx = i;
+      break;
+    }
+  }
+  setActiveEpubChapter(activeIdx, { updateScroll: true });
+}
+
+function queueActiveEpubDetection() {
+  if (EPUB.activeRaf) cancelAnimationFrame(EPUB.activeRaf);
+  EPUB.activeRaf = requestAnimationFrame(() => {
+    EPUB.activeRaf = null;
+    detectActiveEpubChapterFromScroll();
+  });
+}
+
+function renderEpubContent() {
+  const text = $('epub-text');
+  text.innerHTML = EPUB.chapters.map((chapter, chapterIdx) => {
+    const heading = escHtml(chapter.title || `Chapter ${chapterIdx + 1}`);
+    const paragraphs = chapter.paragraphs.map((para, i) =>
+      `<p class="epub-para" data-idx="${i}" data-chapter="${chapterIdx}">${escHtml(para)}</p>`
+    ).join('');
+    return `<section class="epub-section epub-section-${chapter.kind || 'story'}" data-chapter="${chapterIdx}">
+      <h2 class="epub-section-title serif">${heading}</h2>
+      ${paragraphs}
+    </section>`;
+  }).join('');
+
+  EPUB.sectionEls = Array.from(text.querySelectorAll('.epub-section'));
+  renderEpubCommentDecorations();
+}
+
+function updateEpubProgress() {
+  if (!EPUB.chapters.length) return;
+  const scroll = $('epub-scroll');
+  if (!scroll) return;
+  const chProgress = currentEpubScrollFraction();
+  const pct = ((EPUB.currentChapter + chProgress) / EPUB.chapters.length) * 100;
   const fill = $('epub-progress-fill');
   if (fill) fill.style.width = pct + '%';
 }
@@ -1252,20 +2254,48 @@ function updateEpubTimeEstimate() {
   if (!ch) return;
   const words = ch.paragraphs.join(' ').split(/\s+/).length;
   const WPM = 250;
-  const mins = Math.ceil(words / WPM);
+  const mins = Math.max(1, Math.ceil((words * (1 - currentEpubScrollFraction())) / WPM));
   const el = $('epub-time-est');
   if (el) el.textContent = mins < 60
-    ? `~${mins} min to read`
-    : `~${Math.round(mins / 60 * 10) / 10} hr to read`;
+    ? `~${mins} min left`
+    : `~${Math.round(mins / 60 * 10) / 10} hr left`;
 }
 
 function renderEpubTOC() {
   const list = $('epub-toc-list');
-  list.innerHTML = EPUB.chapters.map((ch, i) =>
-    `<button class="epub-toc-item${i === EPUB.currentChapter ? ' active' : ''}" data-idx="${i}">${escHtml(ch.title || `Chapter ${i + 1}`)}</button>`
-  ).join('');
+  const sections = [];
+  const front = EPUB.chapters.filter(ch => ch.kind === 'frontMatter');
+  const story = EPUB.chapters.filter(ch => ch.kind === 'story');
+  const back = EPUB.chapters.filter(ch => ch.kind === 'backMatter');
+
+  if (front.length) {
+    sections.push(`<div class="epub-toc-group-label">Front Matter</div>`);
+    sections.push(front.map(ch => {
+      const i = EPUB.chapters.indexOf(ch);
+      return `<button class="epub-toc-item epub-toc-item-front${i === EPUB.currentChapter ? ' active' : ''}" data-idx="${i}">${escHtml(ch.title || `Front Matter ${i + 1}`)}</button>`;
+    }).join(''));
+  }
+  if (story.length) {
+    sections.push(`<div class="epub-toc-group-label">Story</div>`);
+    sections.push(story.map(ch => {
+      const i = EPUB.chapters.indexOf(ch);
+      return `<button class="epub-toc-item${i === EPUB.currentChapter ? ' active' : ''}" data-idx="${i}">${escHtml(ch.title || `Chapter ${i + 1}`)}</button>`;
+    }).join(''));
+  }
+  if (back.length) {
+    sections.push(`<div class="epub-toc-group-label">Extras</div>`);
+    sections.push(back.map(ch => {
+      const i = EPUB.chapters.indexOf(ch);
+      return `<button class="epub-toc-item epub-toc-item-back${i === EPUB.currentChapter ? ' active' : ''}" data-idx="${i}">${escHtml(ch.title || `Extra ${i + 1}`)}</button>`;
+    }).join(''));
+  }
+  list.innerHTML = sections.join('');
   list.querySelectorAll('.epub-toc-item').forEach(btn => {
-    btn.addEventListener('click', () => renderEpubChapter(parseInt(btn.dataset.idx, 10)));
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.idx, 10);
+      saveEpubScrollPos();
+      scrollToEpubChapter(idx, { restoreScroll: true, behavior: 'smooth', source: 'toc' });
+    });
   });
 }
 
@@ -1284,6 +2314,9 @@ async function openEpubReader() {
   const res = await api.epub.ensureAndParse({
     bookId: book.id,
     epubKey: book.epubKey || null,
+    bookTitle: book.title || '',
+    chapterCount: book.chapters?.length || 0,
+    audioChapters: (book.chapters || []).map(ch => ({ title: ch.title || '' })),
   });
 
   if (res.error) {
@@ -1292,7 +2325,13 @@ async function openEpubReader() {
     return;
   }
 
-  EPUB.chapters = res.chapters;
+  EPUB.chapters = (res.sections || res.chapters || []).map((chapter, i) => ({
+    ...chapter,
+    title: normalizeEpubChapterTitle(chapter.title, book.title, i, chapter.paragraphs || []),
+  }));
+  EPUB.frontMatterCount = res.frontMatterCount || 0;
+  EPUB.backMatterCount = res.backMatterCount || 0;
+  EPUB.storyStartIndex = res.storyStartIndex || EPUB.frontMatterCount || 0;
 
   // Load reading positions
   const pos = await api.epub.getReadingPos({ bookId: book.id });
@@ -1300,17 +2339,27 @@ async function openEpubReader() {
 
   // Render TOC
   renderEpubTOC();
+  renderEpubContent();
+  applyEpubLayoutState();
 
-  // Figure out which chapter to show (sync with audio chapter)
-  const startChapter = epubChapterForAudio(S.chapterIndex, book.chapters.length, EPUB.chapters.length);
-  renderEpubChapter(startChapter, true);
+  // Restore last reading position
+  const savedChapters = Object.keys(EPUB.readingPos).map(Number).filter(n => !isNaN(n) && n < EPUB.chapters.length);
+  const startChapter = savedChapters.length ? Math.max(...savedChapters) : 0;
+  scrollToEpubChapter(startChapter, { restoreScroll: true, behavior: 'auto', source: 'open' });
 
   applyEpubReaderSettings();
 }
 
 function closeEpubReader() {
+  saveEpubScrollPos();
   hide($('epub-reader'));
   EPUB.isOpen = false;
+  EPUB.readerOnly = false;
+  EPUB.appSidebarOpen = true;
+  EPUB.audioPanelsOpen = true;
+  EPUB.tocOpen = true;
+  EPUB.sectionEls = [];
+  applyEpubLayoutState();
   updateEpubButton();
 }
 
@@ -1434,7 +2483,7 @@ async function attachEpubToBook(book) {
   const epubPath = await api.epub.openFilePicker();
   if (!epubPath) return;
 
-  const isCat = book.isCatalog;
+  const isCat = !!(book.isCatalog || book.s3Prefix || book.uploaded_by || book.chapter_count);
 
   if (isCat) {
     let pct = 0;
@@ -1460,6 +2509,7 @@ async function attachEpubToBook(book) {
   if (S.currentBook?.id === book.id) {
     S.currentBook.hasEpub = true;
     if (isCat) S.currentBook.epubKey = book.epubKey;
+    if (!isCat) S.currentBook.epubPath = book.epubPath;
     updateEpubButton();
   }
 }
@@ -1470,12 +2520,16 @@ async function setupEpubUI() {
   // Load saved settings
   const saved = await api.epub.getReaderSettings();
   if (saved) Object.assign(EPUB.settings, saved);
+  applyEpubLayoutState();
 
-  // btn-epub in player bar
-  $('btn-epub').addEventListener('click', () => {
+  const toggleEpubReader = () => {
     if (EPUB.isOpen) closeEpubReader();
     else openEpubReader();
-  });
+  };
+
+  // EPUB buttons in player bar and player view
+  $('btn-epub').addEventListener('click', toggleEpubReader);
+  $('btn-epub-open').addEventListener('click', toggleEpubReader);
 
   // Close button
   $('epub-close-btn').addEventListener('click', () => {
@@ -1486,7 +2540,24 @@ async function setupEpubUI() {
   // TOC toggle
   $('epub-toc-btn').addEventListener('click', () => {
     EPUB.tocOpen = !EPUB.tocOpen;
-    $('epub-toc').classList.toggle('hidden', !EPUB.tocOpen);
+    EPUB.readerOnly = false;
+    applyEpubLayoutState();
+  });
+
+  $('epub-app-sidebar-btn').addEventListener('click', () => {
+    EPUB.appSidebarOpen = !EPUB.appSidebarOpen;
+    EPUB.readerOnly = false;
+    applyEpubLayoutState();
+  });
+
+  $('epub-audio-panels-btn').addEventListener('click', () => {
+    EPUB.audioPanelsOpen = !EPUB.audioPanelsOpen;
+    EPUB.readerOnly = false;
+    applyEpubLayoutState();
+  });
+
+  $('epub-reader-mode-btn').addEventListener('click', () => {
+    setReaderOnlyMode(!EPUB.readerOnly);
   });
 
   // Settings btn
@@ -1567,22 +2638,34 @@ async function setupEpubUI() {
   // Chapter nav buttons
   $('epub-prev-ch').addEventListener('click', () => {
     if (EPUB.currentChapter > 0) {
+      const target = EPUB.currentChapter - 1;
       saveEpubScrollPos();
-      renderEpubChapter(EPUB.currentChapter - 1, true);
+      scrollToEpubChapter(target, { restoreScroll: true, behavior: 'smooth', source: 'nav' });
     }
   });
   $('epub-next-ch').addEventListener('click', () => {
     if (EPUB.currentChapter < EPUB.chapters.length - 1) {
+      const target = EPUB.currentChapter + 1;
       saveEpubScrollPos();
-      renderEpubChapter(EPUB.currentChapter + 1, true);
+      scrollToEpubChapter(target, { restoreScroll: true, behavior: 'smooth', source: 'nav' });
     }
   });
 
   // Scroll → save position + update progress bar
   $('epub-scroll').addEventListener('scroll', () => {
     updateEpubProgress();
+    updateEpubTimeEstimate();
+    if (Date.now() >= EPUB.scrollReleaseAt) EPUB.currentScrollSource = 'user';
+    queueActiveEpubDetection();
     clearTimeout(EPUB._scrollTimer);
     EPUB._scrollTimer = setTimeout(saveEpubScrollPos, 600);
+  });
+
+  window.addEventListener('resize', () => {
+    clearTimeout(EPUB._resizeTimer);
+    EPUB._resizeTimer = setTimeout(() => {
+      if (EPUB.isOpen) queueActiveEpubDetection();
+    }, 120);
   });
 }
 
@@ -1598,6 +2681,8 @@ async function showContextMenu(e, bookId) {
   menu.style.top  = Math.min(e.clientY, window.innerHeight - 280) + 'px';
 
   hide($('ctx-view-transcript'));
+  hide($('ctx-retranscribe'));
+  hide($('ctx-smart-sync'));
 
   const book = S.books.find(b => b.id === bookId);
   const isCat = !!book?.isCatalog;
@@ -1607,16 +2692,20 @@ async function showContextMenu(e, bookId) {
   toggle($('ctx-set-cover'), !isCat);
   toggle($('ctx-set-bg'),    !isCat);
   toggle($('ctx-split'),     !isCat && book?.chapterCount === 1);
-  toggle($('ctx-transcribe'),!isCat);
+  $('ctx-transcribe').textContent = isCat ? '↓ Download + Transcribe…' : '◎ Transcribe…';
+  toggle($('ctx-transcribe'), !!book);
   toggle($('ctx-reimport'),  !isCat);
+  toggle($('ctx-attach-epub'), !!book);
 
   show(menu);
 
   if (!isCat) {
-    const transcript = await api.getTranscript(bookId);
-    S.ctxTranscript = transcript;
+    const transcriptState = await api.transcriptExists(bookId);
+    S.ctxTranscript = transcriptState?.exists || false;
     if (!menu.classList.contains('hidden')) {
-      toggle($('ctx-view-transcript'), !!transcript);
+      toggle($('ctx-view-transcript'), !!transcriptState?.exists);
+      toggle($('ctx-retranscribe'), !!transcriptState?.exists);
+      toggle($('ctx-smart-sync'), !!transcriptState?.exists);
     }
   }
 }
@@ -1685,6 +2774,7 @@ function setupAudio() {
 
   audio.addEventListener('timeupdate', () => {
     if (!S.isSeeking) updateSeekBar();
+    enqueueTimedComments();
   });
 
   audio.addEventListener('error', e => {
@@ -1699,6 +2789,12 @@ function setupKeys() {
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
     switch (e.code) {
+      case 'Escape':
+        if (EPUB.isOpen && EPUB.readerOnly) {
+          e.preventDefault();
+          setReaderOnlyMode(false);
+        }
+        break;
       case 'Space':
         e.preventDefault();
         togglePlay();
@@ -1725,12 +2821,19 @@ function setupKeys() {
       case 'KeyP':
         prevChapter();
         break;
+      case 'KeyC':
+        e.preventDefault();
+        openCommentComposer();
+        break;
     }
   });
 }
 
 // ── UI event listeners ────────────────────────────────────────────────────────
 function setupUI() {
+  ensureSmartSyncProgressListener();
+  ensureCommentPolling();
+
   // Titlebar
   $('btn-minimize').addEventListener('click', () => api.minimize());
   $('btn-maximize').addEventListener('click', () => api.maximize());
@@ -1939,40 +3042,22 @@ function setupUI() {
 
   $('ctx-transcribe').addEventListener('click', async () => {
     hideContextMenu();
-    const book = S.books.find(b => b.id === S.ctxBookId);
+    let book = S.books.find(b => b.id === S.ctxBookId);
     if (!book) return;
-
-    openTranscriptPanel(book);
-    setTranscriptStatus(`Starting transcription of ${book.chapterCount} chapter${book.chapterCount !== 1 ? 's' : ''}…`, true);
-
-    api.onTranscribeProgress((data) => {
-      if (data.type === 'model_load') {
-        setTranscriptStatus('Loading Whisper model…', true);
-      } else if (data.type === 'device') {
-        const label = data.device === 'cuda'
-          ? `Running on GPU (${data.compute_type})`
-          : `Running on CPU (${data.compute_type})`;
-        setTranscriptStatus(label, true);
-      } else if (data.type === 'model_download') {
-        setTranscriptStatus(`Downloading model… ${data.pct}%`, true);
-      } else {
-        // type === 'chapter'
-        const { chapterIndex, total, chapterTitle, text, words } = data;
-        setTranscriptStatus(`Transcribed chapter ${chapterIndex + 1} of ${total}…`, true);
-        appendChapter(chapterIndex + 1, chapterTitle, text, words || null);
+    if (book.isCatalog) {
+      const result = await api.catalog.addToLibrary({ bookId: book.id });
+      if (result?.error) {
+        showToast('Error: ' + result.error, true);
+        return;
       }
-    });
-
-    const result = await api.transcribe(book.id);
-
-    if (result?.error) {
-      setTranscriptStatus('Error: ' + result.error, false);
-      return;
+      await loadLibrary();
+      book = S.books.find(b => b.id === S.ctxBookId && !b.isCatalog) || await api.getBook(S.ctxBookId);
+      if (!book) {
+        showToast('Downloaded book could not be loaded.', true);
+        return;
+      }
     }
-
-    setTranscriptStatus('Transcription complete', false);
-    // Update context-menu cache so "View Transcript" appears next time
-    S.ctxTranscript = result;
+    await runContextMenuTranscription(book);
   });
 
   $('ctx-view-transcript').addEventListener('click', async () => {
@@ -1982,12 +3067,58 @@ function setupUI() {
     await loadAndShowTranscript(book);
   });
 
+  $('ctx-retranscribe').addEventListener('click', async () => {
+    hideContextMenu();
+    const book = S.books.find(b => b.id === S.ctxBookId);
+    if (!book) return;
+    await runContextMenuTranscription(book, { force: true });
+  });
+
+  $('ctx-smart-sync').addEventListener('click', async () => {
+    hideContextMenu();
+    const book = S.books.find(b => b.id === S.ctxBookId);
+    if (!book) return;
+    const result = await startSmartSyncForBook(book);
+    if (result?.error) return;
+    showToast(result?.cacheHit ? 'Smart sync loaded from cache.' : 'Smart sync completed.');
+  });
+
+  $('ctx-attach-epub').addEventListener('click', async () => {
+    hideContextMenu();
+    const book = S.books.find(b => b.id === S.ctxBookId);
+    if (!book) return;
+    await attachEpubToBook(book);
+  });
+
   $('tp-close').addEventListener('click', closeTranscriptPanel);
   $('tp-expand').addEventListener('click', openReaderFullscreen);
   $('tp-follow-btn').addEventListener('click', toggleKaraoke);
   $('rfs-close').addEventListener('click', closeReaderFullscreen);
   $('rfs-follow-btn').addEventListener('click', toggleKaraoke);
   $('btn-transcript').addEventListener('click', toggleTranscriptPanel);
+  $('btn-comments').addEventListener('click', () => openCommentComposer());
+  $('comment-drop-input').addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeCommentComposer();
+    if (e.key === 'Enter') submitCommentComposer();
+  });
+  $('epub-selection-comment-btn').addEventListener('click', () => {
+    if (!COMMENTS.epubSelection) return;
+    openCommentComposer({
+      selectedText: COMMENTS.epubSelection.text,
+      epubChapterIndex: COMMENTS.epubSelection.chapterIndex,
+      epubParagraphIndex: COMMENTS.epubSelection.paragraphIndex,
+    });
+    hideEpubSelectionPopup();
+  });
+  api.comments.onSeekRequest(({ chapterIndex, audioTimestampSeconds }) => {
+    if (chapterIndex !== S.chapterIndex) {
+      playChapter(chapterIndex, audioTimestampSeconds);
+    } else {
+      seekToTime(audioTimestampSeconds);
+    }
+  });
+  $('epub-text').addEventListener('mouseup', updateEpubSelectionFromRange);
+  $('epub-text').addEventListener('keyup', updateEpubSelectionFromRange);
 
   $('ctx-reimport').addEventListener('click', async () => {
     hideContextMenu();
@@ -2010,12 +3141,15 @@ function setupUI() {
     const book = S.books.find(b => b.id === S.ctxBookId);
     if (!book) return;
     if (!confirm(`Remove "${book.title}" from library?`)) return;
-    if (book.isCatalog) {
-      await api.catalog.removeFromLibrary({ bookId: book.id });
+    const removalCatalogId = getLibraryRemovalCatalogId(book);
+    if (removalCatalogId) {
+      await api.catalog.removeFromLibrary({ bookId: removalCatalogId });
     } else {
       await api.deleteBook(book.id);
     }
-    S.books = S.books.filter(b => b.id !== book.id);
+    S.books = S.books.filter(b =>
+      b.id !== book.id && linkedCatalogBookId(b) !== removalCatalogId
+    );
     if (S.currentBook?.id === book.id) {
       audio.pause();
       audio.src = '';
@@ -2044,13 +3178,22 @@ function setupUI() {
         && !e.target.closest('#btn-settings') && !e.target.closest('#btn-account')) {
       hide(sp);
     }
+    const composer = $('comment-drop-popup');
+    if (!composer.classList.contains('hidden') && !composer.contains(e.target) && !e.target.closest('#btn-comments')) {
+      closeCommentComposer();
+    }
+    const selection = $('epub-selection-popup');
+    if (!selection.classList.contains('hidden') && !selection.contains(e.target)) {
+      hideEpubSelectionPopup();
+    }
   });
 
   // Save on page unload
   window.addEventListener('beforeunload', () => savePlayback());
 
   // ── Approval overlay ──────────────────────────────────────────────────────
-  $('approval-logout-btn').addEventListener('click', async () => {
+  const approvalLogoutBtn = $('approval-logout-btn');
+  if (approvalLogoutBtn) approvalLogoutBtn.addEventListener('click', async () => {
     clearInterval(S.saveInterval);
     clearInterval(S.syncInterval);
     audio.pause();
@@ -2058,12 +3201,13 @@ function setupUI() {
     S.isPlaying = false;
     await api.auth.logout();
     authUser = null;
+    clearCommentNotificationState();
     S.books = [];
     S.currentBook = null;
     S.bookmarks = [];
     S.chapterIndex = 0;
     S.searchQuery = '';
-    hide($('approval-overlay'));
+    hide($('approval-overlay-legacy'));
     $('auth-overlay').classList.remove('auth-fade-out');
     setAuthMode('login');
     show($('auth-overlay'));
@@ -2099,7 +3243,7 @@ function setupUI() {
 
   // ── Settings popup (sidebar account button + legacy player-bar button) ───────
   function openSettingsPopup() {
-    if (authUser) $('settings-email').textContent = authUser.email;
+    if (authUser) $('settings-email').textContent = displayUsername(authUser);
     $('settings-popup').classList.toggle('hidden');
     hide($('sleep-popup'));
   }
@@ -2118,6 +3262,9 @@ function setupUI() {
 
     await api.auth.logout();
     authUser = null;
+    clearCommentNotificationState();
+    closeCommentComposer();
+      hideEpubSelectionPopup();
 
     // Reset all in-memory state
     S.books = [];
@@ -2135,9 +3282,10 @@ function setupUI() {
 
     // Reset overlay to login form and show
     $('auth-email').value = '';
+    $('auth-username').value = '';
     $('auth-password').value = '';
     hide($('auth-error'));
-    hide($('approval-overlay'));
+    hide($('approval-overlay-legacy'));
     $('auth-overlay').classList.remove('auth-fade-out');
     setAuthMode('login');
     show($('auth-overlay'));
@@ -2154,6 +3302,12 @@ function setupUI() {
   $('auth-submit').addEventListener('click', handleAuthSubmit);
 
   $('auth-email').addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      if ($('auth-overlay').dataset.mode === 'signup') $('auth-username').focus();
+      else $('auth-password').focus();
+    }
+  });
+  $('auth-username').addEventListener('keydown', e => {
     if (e.key === 'Enter') $('auth-password').focus();
   });
   $('auth-password').addEventListener('keydown', e => {
@@ -2429,7 +3583,7 @@ let _catalogCache = null;
 
 function catalogBookCardHTML(book) {
   const col = bookColor(book.title);
-  const inLib = S.books.some(b => b.catalogId === book.id || (b.isCatalog && b.catalogId === book.id));
+  const inLib = catalogBookIsInLibrary(book.id);
   const coverStyle = book.coverUrl
     ? `background: url('${book.coverUrl}') center/cover no-repeat`
     : `background:${col.bg}; color:${col.text}`;
@@ -2543,26 +3697,27 @@ function _renderCatalogContent(books) {
 
 // ── Catalog context menu ────────────────────────────────────────────────────
 
-const ADMIN_EMAIL = 'bakrferas@gmail.com';
 let _ctxCatalogBook = null;
 
 function showCatalogContextMenu(e, book) {
   e.preventDefault();
   _ctxCatalogBook = book;
 
-  const isPrivileged = authUser && (
-    authUser.email === ADMIN_EMAIL || book.uploaded_by === authUser.id
-  );
+  const isPrivileged = authUser && book.uploaded_by === authUser.id;
 
   toggle($('cat-ctx-edit'),   isPrivileged);
+  toggle($('cat-ctx-attach-epub'), isPrivileged);
   toggle($('cat-ctx-delete'), isPrivileged);
-  const divider = document.querySelector('.cat-ctx-admin-only');
+  const divider = document.querySelector('.cat-ctx-owner-only');
   if (divider) toggle(divider, isPrivileged);
 
   // Already in library?
-  const inLib = S.books.some(b => b.isCatalog && b.catalogId === book.id);
-  $('cat-ctx-add').textContent = inLib ? '✓ In Library' : '+ Add to Library';
-  $('cat-ctx-add').disabled = inLib;
+  const inLib = catalogBookIsInLibrary(book.id);
+  const hasLocalCopy = catalogBookHasLocalCopy(book.id);
+  $('cat-ctx-add').textContent = hasLocalCopy
+    ? '✓ In Library'
+    : (inLib ? '↓ Download to Library' : '+ Add to Library');
+  $('cat-ctx-add').disabled = hasLocalCopy;
 
   const menu = $('cat-ctx-menu');
   menu.style.left = Math.min(e.clientX, window.innerWidth  - 220) + 'px';
@@ -2604,23 +3759,26 @@ function openBookDetailModal(book) {
 
   // Add to Library button
   const addBtn = $('book-detail-add-btn');
-  const alreadyAdded = S.books.some(b => b.isCatalog && b.catalogId === book.id);
-  addBtn.disabled    = alreadyAdded;
-  addBtn.textContent = alreadyAdded ? 'In Library' : 'Add to My Library';
-  addBtn.classList.toggle('already-added', alreadyAdded);
+  const alreadyAdded = catalogBookIsInLibrary(book.id);
+  const hasLocalCopy = catalogBookHasLocalCopy(book.id);
+  addBtn.disabled    = hasLocalCopy;
+  addBtn.textContent = hasLocalCopy
+    ? 'In Library'
+    : (alreadyAdded ? 'Download to My Library' : 'Add to My Library');
+  addBtn.classList.toggle('already-added', hasLocalCopy);
 
   // Remove old listener by cloning
   const newBtn = addBtn.cloneNode(true);
   addBtn.parentNode.replaceChild(newBtn, addBtn);
 
-  if (!alreadyAdded) {
+  if (!hasLocalCopy) {
     newBtn.addEventListener('click', async () => {
       newBtn.disabled    = true;
-      newBtn.textContent = 'Adding…';
+      newBtn.textContent = 'Downloading…';
       const res = await api.catalog.addToLibrary({ bookId: book.id });
       if (res.error) {
         newBtn.disabled    = false;
-        newBtn.textContent = 'Add to My Library';
+        newBtn.textContent = alreadyAdded ? 'Download to My Library' : 'Add to My Library';
         alert('Error: ' + res.error);
       } else {
         newBtn.textContent = 'In Library';
@@ -2769,7 +3927,7 @@ function setupCatalogUploadModal() {
     if (!book) return;
     const res = await api.catalog.addToLibrary({ bookId: book.id });
     if (res.error) { showToast('Error: ' + res.error, true); return; }
-    showToast(`"${book.title}" added to your library.`);
+    showToast(`"${book.title}" downloaded to your library.`);
     await loadLibrary();
     if (_catalogCache) _renderCatalogContent(_catalogCache);
   });
@@ -2783,6 +3941,15 @@ function setupCatalogUploadModal() {
     $('edit-book-series').value       = book.series || '';
     $('edit-book-series-order').value = book.series_order || '';
     show($('edit-book-modal'));
+  });
+
+  $('cat-ctx-attach-epub').addEventListener('click', async () => {
+    hideCatalogContextMenu();
+    const book = _ctxCatalogBook;
+    if (!book) return;
+    await attachEpubToBook(book);
+    _catalogCache = null;
+    renderCatalog(true);
   });
 
   $('edit-book-cancel').addEventListener('click', () => hide($('edit-book-modal')));
@@ -2834,8 +4001,7 @@ function setupCatalogUploadModal() {
     }
 
     // Remove from local library if present
-    const libBook = S.books.find(b => b.isCatalog && b.catalogId === book.id);
-    if (libBook) S.books = S.books.filter(b => b !== libBook);
+    S.books = S.books.filter(b => b.id !== book.id && linkedCatalogBookId(b) !== book.id);
     _catalogCache = null;
 
     showToast(`"${book.title}" removed from the marketplace.`);
@@ -2877,6 +4043,11 @@ function setAuthMode(mode) {
   hide($('auth-loading'));
   show($('auth-form-wrap'));
   const isLogin = mode === 'login';
+  $('auth-email').classList.remove('hidden');
+  $('auth-username').classList.toggle('hidden', isLogin);
+  $('auth-form-subtitle').textContent = isLogin
+    ? 'Sign in with your email to access your library'
+    : 'Create an account with email, username, and password';
   $('auth-submit').textContent      = isLogin ? 'Sign In' : 'Create Account';
   $('auth-switch-text').textContent = isLogin ? "Don't have an account?" : 'Already have one?';
   $('auth-switch-btn').textContent  = isLogin ? 'Sign Up' : 'Sign In';
@@ -2898,17 +4069,7 @@ async function checkAuthAndPull() {
   const session = await api.auth.getSession();
   if (session?.user) {
     authUser = session.user;
-    // Check approval before granting access
-    const approval = await api.auth.checkApproval();
-    // On DB error, don't block the user — log and proceed
-    if (!approval.error && !approval.approved) {
-      hideAuthOverlay();
-      show($('approval-overlay'));
-      $('settings-email').textContent = authUser.email;
-      return;
-    }
-    hide($('approval-overlay'));
-    $('settings-email').textContent = authUser.email;
+    $('settings-email').textContent = displayUsername(authUser);
     updateApprovedUI();
     updateAccountBtn();
     api.sync.onStatus(updateSyncDot);
@@ -2923,30 +4084,31 @@ async function checkAuthAndPull() {
 }
 
 function updateApprovedUI() {
-  // Show upload button in catalog view only for logged-in (approved) users
+  // Show upload button in catalog view only for logged-in users.
   const btn = $('catalog-upload-btn');
   if (btn) toggle(btn, !!authUser);
 }
 
 function updateAccountBtn() {
   const el = $('sidebar-email');
-  if (el) el.textContent = authUser ? authUser.email : 'Not signed in';
+  if (el) el.textContent = displayUsername(authUser);
 }
 
 async function handleAuthSubmit() {
-  const email    = $('auth-email').value.trim();
+  const email = $('auth-email').value.trim();
+  const username = $('auth-username').value.trim();
   const password = $('auth-password').value;
-  if (!email || !password) return;
+  const mode = $('auth-overlay').dataset.mode;
+  if (!email || !password || (mode === 'signup' && !username)) return;
 
   const btn  = $('auth-submit');
-  const mode = $('auth-overlay').dataset.mode;
   btn.disabled    = true;
   btn.textContent = 'Please wait…';
   hide($('auth-error'));
 
   const result = mode === 'login'
     ? await api.auth.login({ email, password })
-    : await api.auth.signup({ email, password });
+    : await api.auth.signup({ email, username, password });
 
   if (result.error) {
     showAuthError(result.error);
@@ -2958,17 +4120,8 @@ async function handleAuthSubmit() {
     setAuthMode('login');
   } else {
     authUser = result.user;
-    $('settings-email').textContent = authUser.email;
+    $('settings-email').textContent = displayUsername(authUser);
     updateAccountBtn();
-    // Check approval before granting access
-    const approval = await api.auth.checkApproval();
-    // On DB error, don't block the user — log and proceed
-    if (!approval.error && !approval.approved) {
-      hideAuthOverlay();
-      show($('approval-overlay'));
-      return;
-    }
-    hide($('approval-overlay'));
     updateApprovedUI();
     api.sync.onStatus(updateSyncDot);
     updateSyncDot('syncing');
@@ -2984,6 +4137,7 @@ async function init() {
   setupSeekBars();
   setupKeys();
   setupUI();
+  await setupEpubUI();
   setupSplitModal();
   setupCatalogUploadModal();
   updateVolSlider();

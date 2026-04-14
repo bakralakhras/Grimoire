@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('api', {
   openFolder:      ()    => ipcRenderer.invoke('dialog:openFolder'),
   openImageFile:   ()    => ipcRenderer.invoke('dialog:openImageFile'),
   importFolder: (p)      => ipcRenderer.invoke('library:import', p),
+  book: {
+    transcribe: (bookId) => ipcRenderer.invoke('book:transcribe', bookId),
+  },
   getLibrary:   ()       => ipcRenderer.invoke('library:getAll'),
   getBook:      (id)     => ipcRenderer.invoke('library:getBook', id),
   deleteBook:   (id)     => ipcRenderer.invoke('library:delete', id),
@@ -34,11 +37,16 @@ contextBridge.exposeInMainWorld('api', {
   updateChapterDuration: (data) => ipcRenderer.invoke('chapters:updateDuration', data),
 
   // Transcription
-  transcribe: (bookId) => ipcRenderer.invoke('book:transcribe', bookId),
+  transcribe: (bookId) => ipcRenderer.invoke('book:transcribe:legacy', bookId),
+  retranscribe: (bookId) => ipcRenderer.invoke('book:transcribe:legacy', bookId),
+  getTranscribeJob: (bookId) => ipcRenderer.invoke('transcribe:getJob', bookId),
+  cancelTranscribe: (bookId) => ipcRenderer.invoke('transcribe:cancel', bookId),
   onTranscribeProgress: (cb) => {
-    ipcRenderer.removeAllListeners('transcribe:progress');
-    ipcRenderer.on('transcribe:progress', (_e, data) => cb(data));
+    const listener = (_e, data) => cb(data);
+    ipcRenderer.on('transcribe:progress', listener);
+    return () => ipcRenderer.removeListener('transcribe:progress', listener);
   },
+  transcriptExists: (bookId) => ipcRenderer.invoke('transcript:exists', bookId),
   getTranscript:      (bookId) => ipcRenderer.invoke('transcript:get', bookId),
   getTranscriptWords: (bookId) => ipcRenderer.invoke('transcript:getWords', bookId),
 
@@ -102,11 +110,20 @@ contextBridge.exposeInMainWorld('api', {
   // Auth
   auth: {
     getSession:     ()     => ipcRenderer.invoke('auth:getSession'),
-    checkApproval:  ()     => ipcRenderer.invoke('auth:checkApproval'),
     login:          (data) => ipcRenderer.invoke('auth:login', data),
     signup:         (data) => ipcRenderer.invoke('auth:signup', data),
     logout:         ()     => ipcRenderer.invoke('auth:logout'),
     skip:           ()     => ipcRenderer.invoke('auth:skip'),
+  },
+
+  comments: {
+    getBook:       (data) => ipcRenderer.invoke('comments:getBook', data),
+    create:        (data) => ipcRenderer.invoke('comments:create', data),
+    delete:        (data) => ipcRenderer.invoke('comments:delete', data),
+    onSeekRequest: (cb) => {
+      ipcRenderer.removeAllListeners('comment:seekTo');
+      ipcRenderer.on('comment:seekTo', (_e, data) => cb(data));
+    },
   },
 
   // Sync

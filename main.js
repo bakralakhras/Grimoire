@@ -325,6 +325,24 @@ function updateSmartSyncJob(job, patch = {}) {
   return job;
 }
 
+// ── Debug logging ─────────────────────────────────────────────────────────────
+
+const LOG_TAG = '[Grimoire]';
+let _logStream = null;
+function _getLogStream() {
+  if (_logStream) return _logStream;
+  try {
+    const logPath = path.join(app.getPath('userData'), 'grimoire-debug.log');
+    _logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  } catch {}
+  return _logStream;
+}
+function dbg(...args) {
+  const line = `${new Date().toISOString()} ${LOG_TAG} ${args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')}`;
+  console.log(line);
+  try { _getLogStream()?.write(line + '\n'); } catch {}
+}
+
 // ── Supabase helpers ──────────────────────────────────────────────────────────
 
 function initSupabase() {
@@ -362,14 +380,26 @@ function clearSession() {
 async function loadSession() {
   if (!supabase) return null;
   try {
-    if (!fs.existsSync(sessionFilePath())) return null;
+    if (!fs.existsSync(sessionFilePath())) {
+      dbg('loadSession: no saved session file');
+      return null;
+    }
     const { access_token, refresh_token } = JSON.parse(fs.readFileSync(sessionFilePath(), 'utf8'));
     const { data, error } = await supabase.auth.setSession({ access_token, refresh_token });
-    if (error || !data?.session) { clearSession(); return null; }
+    if (error || !data?.session) {
+      dbg('loadSession: session restore failed -', error?.message);
+      clearSession();
+      return null;
+    }
     currentUser = await hydrateAuthUser(data.session.user);
+    dbg('loadSession: restored session | userId =', currentUser?.id, '| username =', currentUser?.username);
     saveSession(data.session);
     return data.session;
-  } catch { clearSession(); return null; }
+  } catch (e) {
+    dbg('loadSession: exception -', e.message);
+    clearSession();
+    return null;
+  }
 }
 
 function normalizeUsername(value) {
@@ -653,10 +683,16 @@ function s3ConfigPath() { return path.join(app.getPath('userData'), 's3-config.j
 
 function loadS3Config() {
   try {
-    if (fs.existsSync(s3ConfigPath()))
-      return JSON.parse(fs.readFileSync(s3ConfigPath(), 'utf8'));
-  } catch {}
+    if (fs.existsSync(s3ConfigPath())) {
+      const cfg = JSON.parse(fs.readFileSync(s3ConfigPath(), 'utf8'));
+      dbg('loadS3Config: using file config | accessKeyId =', cfg.accessKeyId, '| bucket =', cfg.bucket, '| region =', cfg.region);
+      return cfg;
+    }
+  } catch (e) {
+    dbg('loadS3Config: file read error -', e.message);
+  }
   // Default credentials (user can override in settings)
+  dbg('loadS3Config: using hardcoded-fallback credentials (no s3-config.json found)');
   return {
     region: 'us-east-1',
     bucket: 'grimoire-library',
@@ -789,8 +825,12 @@ function downloadToFile(url, dest) {
     const http  = require('http');
     const mod   = url.startsWith('https') ? https : http;
     ensureDir(path.dirname(dest));
+    // Log first ~80 chars of URL (host + path prefix) for diagnostics
+    const urlPreview = url.replace(/X-Amz-[^&]+/g, '…').slice(0, 120);
+    dbg('downloadToFile: GET', urlPreview);
     const file  = fs.createWriteStream(dest);
     mod.get(url, res => {
+      dbg('downloadToFile: status', res.statusCode, 'dest =', path.basename(dest));
       if (res.statusCode === 301 || res.statusCode === 302) {
         file.close();
         try { fs.unlinkSync(dest); } catch {}
@@ -798,15 +838,23 @@ function downloadToFile(url, dest) {
         return;
       }
       if (res.statusCode !== 200) {
-        file.close();
-        try { fs.unlinkSync(dest); } catch {}
-        reject(new Error(`Download failed with status ${res.statusCode}`));
+        // Capture error body for diagnostics (S3 returns XML with error code/message)
+        let body = '';
+        res.on('data', chunk => { body += chunk.toString(); });
+        res.on('end', () => {
+          file.close();
+          try { fs.unlinkSync(dest); } catch {}
+          const brief = body.slice(0, 400);
+          dbg('downloadToFile: error body =', brief);
+          reject(new Error(`Download failed with status ${res.statusCode} — ${brief}`));
+        });
+        res.on('error', err => { file.close(); try { fs.unlinkSync(dest); } catch {} reject(err); });
         return;
       }
       res.pipe(file);
       file.on('finish', () => file.close(resolve));
       file.on('error', err => { try { fs.unlinkSync(dest); } catch {} reject(err); });
-    }).on('error', err => { try { fs.unlinkSync(dest); } catch {} reject(err); });
+    }).on('error', err => { dbg('downloadToFile: net error', err.message); try { fs.unlinkSync(dest); } catch {} reject(err); });
   });
 }
 
@@ -1313,6 +1361,12 @@ function normalizeEpubChapters(parsed, targetCount, audioChapters = [], bookTitl
 app.whenReady().then(async () => {
   db = loadDb();
   initSupabase();
+  dbg('startup: packaged =', app.isPackaged, '| userData =', app.getPath('userData'));
+  const s3cfgExists = fs.existsSync(s3ConfigPath());
+  dbg('startup: s3-config.json present =', s3cfgExists);
+  const _startCfg = loadS3Config();
+  dbg('startup: s3 config source =', s3cfgExists ? 'file' : 'hardcoded-fallback',
+    '| accessKeyId =', _startCfg.accessKeyId, '| bucket =', _startCfg.bucket, '| region =', _startCfg.region);
   loadQueue();
   setAuthSkipped(false); // clear any stale skip state — auth is now required
   await loadSession();
@@ -2768,28 +2822,57 @@ function registerIPC() {
     new Notification({ title: 'Grimoire', body: `${username || 'Unknown'}: ${text || ''}` }).show();
   });
 
-  async function catalogCoverUrl(coverS3Key, cfg) {
-    if (!coverS3Key || !cfg?.accessKeyId) return null;
-    try {
-      const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-      const { GetObjectCommand } = require('@aws-sdk/client-s3');
-      return await getSignedUrl(
-        createS3Client(cfg),
-        new GetObjectCommand({ Bucket: cfg.bucket, Key: coverS3Key }),
-        { expiresIn: 7200 }
-      );
-    } catch { return null; }
-  }
-
-  async function catalogObjectUrl(s3Key, cfg, expiresIn = 7200) {
-    if (!s3Key || !cfg?.accessKeyId) throw new Error('S3 not configured');
+  // Generate a presigned/signed URL for a catalog object.
+  // Primary path: Supabase Storage createSignedUrl (uses auth JWT — no IAM credentials needed,
+  //   works for all users in the packaged exe without a local s3-config.json).
+  // Fallback: AWS SDK presigned URL (requires valid IAM credentials in s3-config.json or hardcoded).
+  async function catalogSignedUrl(bucket, s3Key, expiresIn) {
+    // 1. Try Supabase Storage (auth-JWT-based, credential-free for the client)
+    if (supabase && bucket && s3Key) {
+      try {
+        const { data, error } = await supabase.storage.from(bucket).createSignedUrl(s3Key, expiresIn);
+        if (!error && data?.signedUrl) {
+          dbg('catalogSignedUrl: Supabase Storage OK | key =', s3Key);
+          return data.signedUrl;
+        }
+        dbg('catalogSignedUrl: Supabase Storage failed | key =', s3Key, '| error =', error?.message);
+      } catch (e) {
+        dbg('catalogSignedUrl: Supabase Storage exception | key =', s3Key, '| error =', e.message);
+      }
+    }
+    // 2. Fall back to AWS SDK presigned URL (requires IAM credentials)
+    const cfg = loadS3Config();
+    if (!cfg?.accessKeyId) throw new Error('S3 not configured and Supabase Storage unavailable');
+    dbg('catalogSignedUrl: falling back to AWS SDK | key =', s3Key, '| bucket =', cfg.bucket, '| accessKeyId =', cfg.accessKeyId);
     const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
     const { GetObjectCommand } = require('@aws-sdk/client-s3');
-    return await getSignedUrl(
+    const url = await getSignedUrl(
       createS3Client(cfg),
       new GetObjectCommand({ Bucket: cfg.bucket, Key: s3Key }),
       { expiresIn }
     );
+    dbg('catalogSignedUrl: AWS SDK presigned URL generated (first 80 chars) =', url.slice(0, 80));
+    return url;
+  }
+
+  async function catalogCoverUrl(coverS3Key, cfg) {
+    if (!coverS3Key) return null;
+    const bucket = cfg?.bucket || 'grimoire-library';
+    dbg('catalogCoverUrl: key =', coverS3Key, '| bucket =', bucket);
+    try {
+      const url = await catalogSignedUrl(bucket, coverS3Key, 7200);
+      return url;
+    } catch (e) {
+      dbg('catalogCoverUrl: ERROR -', e.message);
+      return null;
+    }
+  }
+
+  async function catalogObjectUrl(s3Key, cfg, expiresIn = 7200) {
+    if (!s3Key) throw new Error('S3 key is required');
+    const bucket = cfg?.bucket || 'grimoire-library';
+    dbg('catalogObjectUrl: key =', s3Key, '| bucket =', bucket, '| expiresIn =', expiresIn);
+    return catalogSignedUrl(bucket, s3Key, expiresIn);
   }
 
   async function fetchCatalogBookById(bookId) {
@@ -2814,7 +2897,9 @@ function registerIPC() {
 
   async function localizeCatalogBook(catBook) {
     const cfg = loadS3Config();
-    if (!cfg?.accessKeyId) throw new Error('S3 not configured');
+    dbg('localizeCatalogBook: id =', catBook?.id, '| s3_prefix =', catBook?.s3_prefix,
+      '| cover_s3_key =', catBook?.cover_s3_key, '| chapters =', catBook?.chapters?.length,
+      '| cfg.accessKeyId =', cfg?.accessKeyId, '| cfg.bucket =', cfg?.bucket);
     if (!catBook?.s3_prefix) throw new Error('Catalog book is missing its storage path');
 
     const sourceChapters = Array.isArray(catBook?.chapters) ? catBook.chapters : [];
@@ -2833,7 +2918,9 @@ function registerIPC() {
       const filepath = path.join(targetDir, filename);
       if (!fs.existsSync(filepath)) {
         if (!sourceFilename) throw new Error(`Catalog chapter ${i + 1} is missing a filename`);
-        const url = await catalogObjectUrl(`${catBook.s3_prefix}${sourceFilename}`, cfg);
+        const s3Key = `${catBook.s3_prefix}${sourceFilename}`;
+        dbg('localizeCatalogBook: downloading chapter', i + 1, '| s3Key =', s3Key);
+        const url = await catalogObjectUrl(s3Key, cfg);
         await downloadToFile(url, filepath);
       }
       localChapters.push({
@@ -2851,9 +2938,10 @@ function registerIPC() {
       const ext = path.extname(catBook.cover_s3_key).toLowerCase() || '.jpg';
       const managedCoverPath = path.join(targetDir, `cover${ext}`);
       if (!fs.existsSync(managedCoverPath)) {
+        dbg('localizeCatalogBook: downloading cover | s3Key =', catBook.cover_s3_key);
         const coverUrl = await catalogObjectUrl(catBook.cover_s3_key, cfg);
         try { await downloadToFile(coverUrl, managedCoverPath); }
-        catch (e) { console.warn('Catalog cover download skipped:', e.message); }
+        catch (e) { dbg('localizeCatalogBook: cover download failed -', e.message); console.warn('Catalog cover download skipped:', e.message); }
       }
       if (fs.existsSync(managedCoverPath)) coverPath = managedCoverPath;
     }
@@ -2888,19 +2976,22 @@ function registerIPC() {
 
   ipcMain.handle('catalog:getAll', async () => {
     if (!supabase) return { error: 'Supabase unavailable' };
+    dbg('catalog:getAll | packaged =', app.isPackaged, '| currentUser =', currentUser?.id || 'none');
     try {
       const { data: books, error } = await supabase
         .from('catalog').select('*')
         .order('series',       { ascending: true, nullsFirst: false })
         .order('series_order', { ascending: true, nullsFirst: true })
         .order('title',        { ascending: true });
-      if (error) return { error: error.message };
+      if (error) { dbg('catalog:getAll: supabase error =', error.message); return { error: error.message }; }
+      dbg('catalog:getAll: fetched', books?.length ?? 0, 'books');
       const cfg = loadS3Config();
-      const result = await Promise.all(books.map(async b => ({
-        ...b, coverUrl: await catalogCoverUrl(b.cover_s3_key, cfg),
-      })));
+      const result = await Promise.all(books.map(async b => {
+        dbg('catalog:getAll: book id =', b.id, '| cover_s3_key =', b.cover_s3_key, '| s3_prefix =', b.s3_prefix);
+        return { ...b, coverUrl: await catalogCoverUrl(b.cover_s3_key, cfg) };
+      }));
       return { books: result };
-    } catch (e) { return { error: e.message }; }
+    } catch (e) { dbg('catalog:getAll: exception -', e.message); return { error: e.message }; }
   });
 
   ipcMain.handle('catalog:getUserLibrary', async () => {
@@ -2950,11 +3041,13 @@ function registerIPC() {
   });
 
   ipcMain.handle('catalog:addToLibrary', async (_e, { bookId }) => {
+    dbg('catalog:addToLibrary: bookId =', bookId, '| currentUser =', currentUser?.id || 'none', '| packaged =', app.isPackaged);
     if (!supabase || !currentUser) return { error: 'Not logged in' };
     let insertedLibraryRow = false;
     const hadManagedLocalBook = !!db.books[bookId];
     try {
       const catBook = await fetchCatalogBookById(bookId);
+      dbg('catalog:addToLibrary: catBook id =', catBook?.id, '| s3_prefix =', catBook?.s3_prefix, '| cover_s3_key =', catBook?.cover_s3_key, '| chapters =', catBook?.chapters?.length);
       const { data: existing } = await supabase
         .from('user_library').select('id')
         .eq('user_id', currentUser.id).eq('book_id', bookId).maybeSingle();

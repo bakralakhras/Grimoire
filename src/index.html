@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Crimson+Text:ital,wght@0,400;0,600;1,400&family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=Lora:ital,wght@0,400;0,500;1,400&family=Open+Sans:wght@400;500&family=Source+Sans+3:wght@400;500&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -169,6 +170,139 @@
         </div>
       </div>
 
+      <!-- ── EPUB Reader Panel ── -->
+      <div id="epub-reader" class="epub-reader hidden">
+        <!-- Header -->
+        <div class="epub-hdr" id="epub-hdr">
+          <div class="epub-hdr-left">
+            <button class="icon-btn" id="epub-toc-btn" title="Chapter list">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+            </button>
+            <div class="epub-hdr-meta">
+              <span class="epub-hdr-book" id="epub-hdr-book"></span>
+              <span class="epub-hdr-chapter" id="epub-hdr-chapter"></span>
+            </div>
+          </div>
+          <div class="epub-hdr-right">
+            <button class="icon-btn" id="epub-settings-btn" title="Reader settings">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+            <button class="icon-btn" id="epub-close-btn" title="Close reader">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+        </div>
+        <!-- Reading progress bar -->
+        <div class="epub-progress-track"><div class="epub-progress-fill" id="epub-progress-fill"></div></div>
+        <!-- Body: TOC sidebar + scroll area -->
+        <div class="epub-body">
+          <div class="epub-toc" id="epub-toc">
+            <div class="epub-toc-title">Chapters</div>
+            <div class="epub-toc-list" id="epub-toc-list"></div>
+          </div>
+          <div class="epub-scroll" id="epub-scroll">
+            <div class="epub-page" id="epub-page">
+              <div class="epub-text" id="epub-text"></div>
+              <div class="epub-ch-nav">
+                <button class="btn-ghost" id="epub-prev-ch">← Previous</button>
+                <span class="epub-time-est" id="epub-time-est"></span>
+                <button class="btn-ghost" id="epub-next-ch">Next →</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Settings panel (slides in from right within reader) -->
+        <div class="epub-settings hidden" id="epub-settings">
+          <div class="epub-settings-hdr">
+            <h3>Reader Settings</h3>
+            <div style="display:flex;gap:8px">
+              <button class="btn-ghost" id="epub-settings-reset" style="font-size:12px;padding:5px 10px">Reset</button>
+              <button class="icon-btn" id="epub-settings-close">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="epub-settings-body">
+
+            <div class="es-section">
+              <div class="es-label">Font</div>
+              <div class="es-font-grid" id="es-font-grid"></div>
+            </div>
+
+            <div class="es-section">
+              <div class="es-row"><span class="es-label">Font Size</span><span class="es-val" id="es-size-val">18px</span></div>
+              <input type="range" class="es-slider" id="es-size" min="12" max="32" step="1" value="18">
+            </div>
+
+            <div class="es-section">
+              <div class="es-row"><span class="es-label">Line Height</span><span class="es-val" id="es-lh-val">1.7</span></div>
+              <input type="range" class="es-slider" id="es-lh" min="1.2" max="2.5" step="0.05" value="1.7">
+            </div>
+
+            <div class="es-section">
+              <div class="es-row"><span class="es-label">Letter Spacing</span><span class="es-val" id="es-ls-val">0px</span></div>
+              <input type="range" class="es-slider" id="es-ls" min="-1" max="3" step="0.25" value="0">
+            </div>
+
+            <div class="es-section">
+              <div class="es-row"><span class="es-label">Word Spacing</span><span class="es-val" id="es-ws-val">0px</span></div>
+              <input type="range" class="es-slider" id="es-ws" min="0" max="10" step="0.5" value="0">
+            </div>
+
+            <div class="es-section">
+              <div class="es-row"><span class="es-label">Paragraph Spacing</span><span class="es-val" id="es-ps-val">20px</span></div>
+              <input type="range" class="es-slider" id="es-ps" min="0" max="48" step="2" value="20">
+            </div>
+
+            <div class="es-section">
+              <div class="es-row"><span class="es-label">Margins</span><span class="es-val" id="es-margin-val">80px</span></div>
+              <input type="range" class="es-slider" id="es-margin" min="0" max="200" step="8" value="80">
+            </div>
+
+            <div class="es-section">
+              <div class="es-label">Alignment</div>
+              <div class="es-btn-group" id="es-align-group">
+                <button class="es-opt active" data-val="left">Left</button>
+                <button class="es-opt" data-val="justify">Justified</button>
+                <button class="es-opt" data-val="center">Center</button>
+              </div>
+            </div>
+
+            <div class="es-section">
+              <div class="es-label">Column Width</div>
+              <div class="es-btn-group" id="es-width-group">
+                <button class="es-opt" data-val="narrow">Narrow</button>
+                <button class="es-opt active" data-val="medium">Medium</button>
+                <button class="es-opt" data-val="wide">Wide</button>
+              </div>
+            </div>
+
+            <div class="es-section es-row">
+              <span class="es-label">Hyphenation</span>
+              <button class="es-toggle active" id="es-hyphen">On</button>
+            </div>
+
+            <div class="es-section">
+              <div class="es-label">Background</div>
+              <div class="es-color-row">
+                <div class="es-swatches" id="es-bg-swatches"></div>
+                <input type="color" class="es-color-picker" id="es-bg-color" value="#1a1625">
+              </div>
+            </div>
+
+            <div class="es-section">
+              <div class="es-label">Text Color</div>
+              <div class="es-color-row">
+                <div class="es-swatches" id="es-text-swatches"></div>
+                <input type="color" class="es-color-picker" id="es-text-color" value="#e8e0d0">
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
       <!-- ── Transcript Panel ── -->
       <div id="transcript-panel">
         <div class="tp-header">
@@ -258,6 +392,9 @@
       <button class="icon-btn" id="btn-transcript" title="Transcript">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>
       </button>
+      <button class="icon-btn hidden" id="btn-epub" title="Read EPUB">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+      </button>
       <div id="sync-dot" class="sync-dot sync-idle" title=""></div>
       <button class="icon-btn" id="btn-settings" title="Account &amp; settings">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
@@ -345,6 +482,7 @@
     <button class="ctx-item hidden" id="ctx-transcribe">◎ Transcribe…</button>
     <button class="ctx-item hidden" id="ctx-view-transcript">≡ View Transcript</button>
     <button class="ctx-item hidden" id="ctx-reimport">↺ Re-import</button>
+    <button class="ctx-item hidden" id="ctx-attach-epub">📖 Attach EPUB…</button>
     <div class="ctx-divider"></div>
     <button class="ctx-item danger" id="ctx-delete">✕ Remove from library</button>
   </div>
@@ -353,6 +491,7 @@
   <div id="cat-ctx-menu" class="ctx-menu hidden">
     <button class="ctx-item" id="cat-ctx-add">+ Add to Library</button>
     <button class="ctx-item hidden" id="cat-ctx-edit">✎ Edit Book…</button>
+    <button class="ctx-item hidden" id="cat-ctx-attach-epub">📖 Attach EPUB…</button>
     <div class="ctx-divider cat-ctx-admin-only hidden"></div>
     <button class="ctx-item danger hidden" id="cat-ctx-delete">✕ Remove from Marketplace</button>
   </div>

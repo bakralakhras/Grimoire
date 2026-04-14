@@ -290,6 +290,115 @@ function chapterTitle(filename) {
   return name || filename.replace(ext, '');
 }
 
+// ── EPUB helpers ─────────────────────────────────────────────────────────────
+
+function downloadToFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const https = require('https');
+    const http  = require('http');
+    const mod   = url.startsWith('https') ? https : http;
+    const file  = fs.createWriteStream(dest);
+    mod.get(url, res => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        file.close();
+        try { fs.unlinkSync(dest); } catch {}
+        downloadToFile(res.headers.location, dest).then(resolve).catch(reject);
+        return;
+      }
+      res.pipe(file);
+      file.on('finish', () => file.close(resolve));
+      file.on('error', err => { try { fs.unlinkSync(dest); } catch {} reject(err); });
+    }).on('error', err => { try { fs.unlinkSync(dest); } catch {} reject(err); });
+  });
+}
+
+function decodeEpubEntities(str) {
+  return str
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, '\u00a0').replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+
+function extractEpubParagraphs(html) {
+  html = html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+  const paras = [];
+  const re = /<(p|h[1-6]|li|blockquote|td|th)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const text = decodeEpubEntities(m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+    if (text.length > 8) paras.push(text);
+  }
+  if (!paras.length) {
+    decodeEpubEntities(html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
+      .split(/\n\n+/).map(s => s.trim()).filter(s => s.length > 8).forEach(p => paras.push(p));
+  }
+  return paras;
+}
+
+async function parseEpubFile(epubPath) {
+  const JSZip = require('jszip');
+  const zip = await JSZip.loadAsync(fs.readFileSync(epubPath));
+
+  const containerEntry = zip.file('META-INF/container.xml');
+  if (!containerEntry) throw new Error('Not a valid EPUB: missing container.xml');
+  const containerXml = await containerEntry.async('string');
+
+  const opfMatch = containerXml.match(/full-path="([^"]+)"/);
+  if (!opfMatch) throw new Error('Cannot find OPF path');
+  const opfPath = opfMatch[1];
+  const opfDir  = opfPath.includes('/') ? opfPath.split('/').slice(0, -1).join('/') : '';
+
+  const opfEntry = zip.file(opfPath);
+  if (!opfEntry) throw new Error('Cannot find OPF file: ' + opfPath);
+  const opfXml = await opfEntry.async('string');
+
+  // Build manifest id → href
+  const manifest = {};
+  let mm;
+  const maniRe = /<item\b[^>]*>/gi;
+  while ((mm = maniRe.exec(opfXml)) !== null) {
+    const id   = mm[0].match(/\bid="([^"]+)"/)?.[1];
+    const href = mm[0].match(/\bhref="([^"]+)"/)?.[1];
+    if (id && href) manifest[id] = href;
+  }
+
+  // Spine order
+  const spineIds = [];
+  const spineRe = /<itemref\b[^>]*idref="([^"]+)"/gi;
+  while ((mm = spineRe.exec(opfXml)) !== null) spineIds.push(mm[1]);
+
+  const results = await Promise.all(spineIds.map(async id => {
+    const href = manifest[id];
+    if (!href) return null;
+    // Resolve path within zip
+    const parts = (opfDir ? opfDir + '/' + href : href).split('/').reduce((acc, p) => {
+      if (p === '..') acc.pop(); else if (p !== '.') acc.push(p);
+      return acc;
+    }, []);
+    const filePath = parts.join('/');
+    const entry = zip.file(filePath) || zip.file(href);
+    if (!entry) return null;
+    try {
+      const html = await entry.async('string');
+      const paragraphs = extractEpubParagraphs(html);
+      if (!paragraphs.length) return null;
+      const title = (
+        html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim() ||
+        html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1]?.replace(/<[^>]+>/g,'')?.trim() ||
+        html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i)?.[1]?.replace(/<[^>]+>/g,'')?.trim() ||
+        ''
+      );
+      return { title: decodeEpubEntities(title), paragraphs };
+    } catch { return null; }
+  }));
+
+  return results.filter(Boolean);
+}
+
 // ── App setup ────────────────────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
@@ -1242,6 +1351,9 @@ function registerIPC() {
           chapterCount: cat.chapter_count || chapters.length,
           coverUrl,     coverPath: null, folderPath: null,
           isCloudOnly:  true, isCatalog: true,
+          hasEpub:      cat.has_epub  || false,
+          epubKey:      cat.epub_key  || null,
+          uploadedBy:   cat.uploaded_by || null,
           addedAt:      entry.added_at,
           playback:     db.playback[cat.id] || null,
         };
@@ -1424,6 +1536,139 @@ function registerIPC() {
     } catch (e) {
       return { error: e.message };
     }
+  });
+
+  // ── EPUB ─────────────────────────────────────────────────────────────────────
+
+  ipcMain.handle('dialog:openEpubFile', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      title: 'Select EPUB File',
+      filters: [{ name: 'EPUB Books', extensions: ['epub'] }],
+    });
+    return canceled ? null : filePaths[0];
+  });
+
+  ipcMain.handle('epub:attachLocal', async (_e, { bookId, epubPath }) => {
+    const book = db.books[bookId];
+    if (!book) return { error: 'Book not found' };
+    try {
+      const epubDir = path.join(app.getPath('userData'), 'epubs');
+      if (!fs.existsSync(epubDir)) fs.mkdirSync(epubDir, { recursive: true });
+      const dest = path.join(epubDir, `${bookId}.epub`);
+      fs.copyFileSync(epubPath, dest);
+      book.epubPath = dest;
+      book.hasEpub = true;
+      saveDb();
+      // Invalidate parse cache
+      const cf = path.join(app.getPath('userData'), 'epub-cache', `${bookId}.json`);
+      if (fs.existsSync(cf)) try { fs.unlinkSync(cf); } catch {}
+      return { success: true };
+    } catch (e) { return { error: e.message }; }
+  });
+
+  ipcMain.handle('epub:attachCatalog', async (event, { bookId, epubPath }) => {
+    if (!supabase || !currentUser) return { error: 'Not logged in' };
+    const cfg = loadS3Config();
+    if (!cfg?.accessKeyId) return { error: 'S3 not configured' };
+    try {
+      const { Upload } = require('@aws-sdk/lib-storage');
+      const s3 = createS3Client(cfg);
+      const s3Key = `catalog/${bookId}/book.epub`;
+      event.sender.send('epub:uploadProgress', { progress: 0, message: 'Uploading EPUB…' });
+      const uploader = new Upload({
+        client: s3,
+        params: { Bucket: cfg.bucket, Key: s3Key, Body: fs.createReadStream(epubPath), ContentType: 'application/epub+zip' },
+      });
+      uploader.on('httpUploadProgress', ({ loaded, total }) => {
+        if (total) event.sender.send('epub:uploadProgress', { progress: Math.round(loaded / total * 90) });
+      });
+      await uploader.done();
+      const { error } = await supabase.from('catalog').update({ epub_key: s3Key, has_epub: true }).eq('id', bookId);
+      if (error) return { error: error.message };
+      // Cache a local copy and invalidate parse cache
+      try {
+        const epubDir = path.join(app.getPath('userData'), 'epubs');
+        if (!fs.existsSync(epubDir)) fs.mkdirSync(epubDir, { recursive: true });
+        fs.copyFileSync(epubPath, path.join(epubDir, `${bookId}.epub`));
+        const cf = path.join(app.getPath('userData'), 'epub-cache', `${bookId}.json`);
+        if (fs.existsSync(cf)) try { fs.unlinkSync(cf); } catch {}
+      } catch {}
+      event.sender.send('epub:uploadProgress', { progress: 100, message: 'Done!' });
+      return { success: true, epubKey: s3Key };
+    } catch (e) { return { error: e.message }; }
+  });
+
+  ipcMain.handle('epub:ensureAndParse', async (_e, { bookId, epubKey }) => {
+    const cacheDir = path.join(app.getPath('userData'), 'epub-cache');
+    const cacheFile = path.join(cacheDir, `${bookId}.json`);
+    if (fs.existsSync(cacheFile)) {
+      try { return { chapters: JSON.parse(fs.readFileSync(cacheFile, 'utf8')) }; } catch {}
+    }
+    let epubPath = null;
+    if (db.books[bookId]?.epubPath && fs.existsSync(db.books[bookId].epubPath))
+      epubPath = db.books[bookId].epubPath;
+    const epubDir = path.join(app.getPath('userData'), 'epubs');
+    const cachedEpub = path.join(epubDir, `${bookId}.epub`);
+    if (!epubPath && fs.existsSync(cachedEpub)) epubPath = cachedEpub;
+    if (!epubPath && epubKey) {
+      const cfg = loadS3Config();
+      if (!cfg?.accessKeyId) return { error: 'S3 not configured' };
+      try {
+        const { GetObjectCommand } = require('@aws-sdk/client-s3');
+        const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+        const url = await getSignedUrl(
+          createS3Client(cfg),
+          new GetObjectCommand({ Bucket: cfg.bucket, Key: epubKey }),
+          { expiresIn: 900 }
+        );
+        if (!fs.existsSync(epubDir)) fs.mkdirSync(epubDir, { recursive: true });
+        await downloadToFile(url, cachedEpub);
+        epubPath = cachedEpub;
+      } catch (e) { return { error: 'Failed to download EPUB: ' + e.message }; }
+    }
+    if (!epubPath) return { error: 'No EPUB file found. Attach one first via right-click.' };
+    try {
+      const chapters = await parseEpubFile(epubPath);
+      if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+      fs.writeFileSync(cacheFile, JSON.stringify(chapters), 'utf8');
+      return { chapters };
+    } catch (e) { return { error: 'EPUB parse error: ' + e.message }; }
+  });
+
+  ipcMain.handle('epub:getReadingPos', (_e, { bookId }) => {
+    try {
+      const f = path.join(app.getPath('userData'), 'epub-reading-pos.json');
+      if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8'))[bookId] || {};
+    } catch {}
+    return {};
+  });
+
+  ipcMain.handle('epub:saveReadingPos', (_e, { bookId, chapterIndex, scrollTop }) => {
+    try {
+      const f = path.join(app.getPath('userData'), 'epub-reading-pos.json');
+      let d = {};
+      try { d = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
+      if (!d[bookId]) d[bookId] = {};
+      d[bookId][String(chapterIndex)] = scrollTop;
+      fs.writeFileSync(f, JSON.stringify(d), 'utf8');
+    } catch {}
+    return { success: true };
+  });
+
+  ipcMain.handle('epub:getReaderSettings', () => {
+    try {
+      const f = path.join(app.getPath('userData'), 'epub-reader-settings.json');
+      if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8'));
+    } catch {}
+    return null;
+  });
+
+  ipcMain.handle('epub:saveReaderSettings', (_e, settings) => {
+    try {
+      fs.writeFileSync(path.join(app.getPath('userData'), 'epub-reader-settings.json'), JSON.stringify(settings, null, 2), 'utf8');
+    } catch {}
+    return { success: true };
   });
 
   ipcMain.handle('s3:getPresignedUrl', async (_e, { bookId, chapterIndex }) => {

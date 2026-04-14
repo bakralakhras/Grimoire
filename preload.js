@@ -83,6 +83,22 @@ contextBridge.exposeInMainWorld('api', {
     },
   },
 
+  // EPUB reader
+  epub: {
+    openFilePicker:    ()      => ipcRenderer.invoke('dialog:openEpubFile'),
+    attachLocal:       (data)  => ipcRenderer.invoke('epub:attachLocal', data),
+    attachCatalog:     (data)  => ipcRenderer.invoke('epub:attachCatalog', data),
+    ensureAndParse:    (data)  => ipcRenderer.invoke('epub:ensureAndParse', data),
+    getReadingPos:     (data)  => ipcRenderer.invoke('epub:getReadingPos', data),
+    saveReadingPos:    (data)  => ipcRenderer.invoke('epub:saveReadingPos', data),
+    getReaderSettings: ()      => ipcRenderer.invoke('epub:getReaderSettings'),
+    saveReaderSettings:(data)  => ipcRenderer.invoke('epub:saveReaderSettings', data),
+    onUploadProgress:  (cb) => {
+      ipcRenderer.removeAllListeners('epub:uploadProgress');
+      ipcRenderer.on('epub:uploadProgress', (_e, data) => cb(data));
+    },
+  },
+
   // Auth
   auth: {
     getSession:     ()     => ipcRenderer.invoke('auth:getSession'),

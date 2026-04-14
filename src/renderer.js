@@ -31,6 +31,60 @@ const S = {
 let authUser = null;      // { id, email } when logged in
 let _progressPushTimer = null;
 
+// ── EPUB state ────────────────────────────────────────────────────────────────
+const EPUB_DEFAULT_SETTINGS = {
+  fontFamily:       'Georgia',
+  fontSize:         18,
+  lineHeight:       1.7,
+  letterSpacing:    0,
+  wordSpacing:      0,
+  paragraphSpacing: 20,
+  marginH:          80,
+  textAlign:        'left',
+  bgColor:          '#1a1625',
+  textColor:        '#e8e0d0',
+  columnWidth:      'medium',
+  hyphenation:      true,
+};
+const EPUB_COLUMN_WIDTHS = { narrow: 520, medium: 680, wide: 860 };
+const EPUB_FONTS = [
+  { label: 'Georgia',       value: 'Georgia, serif' },
+  { label: 'Palatino',      value: '"Palatino Linotype", Palatino, serif' },
+  { label: 'Crimson',       value: '"Crimson Text", serif' },
+  { label: 'Garamond',      value: '"EB Garamond", serif' },
+  { label: 'Lora',          value: 'Lora, serif' },
+  { label: 'Open Sans',     value: '"Open Sans", sans-serif' },
+  { label: 'Source Sans',   value: '"Source Sans 3", sans-serif' },
+  { label: 'Roboto',        value: 'Roboto, sans-serif' },
+  { label: 'Courier New',   value: '"Courier New", monospace' },
+];
+const EPUB_BG_PRESETS = [
+  { label: 'Black',      color: '#0a0a0f' },
+  { label: 'Dark',       color: '#1a1625' },
+  { label: 'Sepia',      color: '#f4ecd8' },
+  { label: 'Warm White', color: '#faf8f5' },
+  { label: 'White',      color: '#ffffff' },
+  { label: 'Dark Blue',  color: '#0d1117' },
+];
+const EPUB_TEXT_PRESETS = [
+  { label: 'Warm',    color: '#e8e0d0' },
+  { label: 'White',   color: '#ffffff' },
+  { label: 'Muted',   color: '#c0b8ac' },
+  { label: 'Dark',    color: '#1a1008' },
+  { label: 'Sepia',   color: '#5c4a2a' },
+];
+
+const EPUB = {
+  chapters: [],
+  currentChapter: 0,
+  isOpen: false,
+  tocOpen: true,
+  readingPos: {},
+  settings: { ...EPUB_DEFAULT_SETTINGS },
+  _saveTimer: null,
+  _scrollTimer: null,
+};
+
 // ── Audio ────────────────────────────────────────────────────────────────────
 const audio = new Audio();
 
@@ -1097,6 +1151,438 @@ function _confirmSetup() {
       hide($('confirm-modal'));
       if (_confirmResolve) { _confirmResolve(false); _confirmResolve = null; }
     }
+  });
+}
+
+// ── EPUB Reader ───────────────────────────────────────────────────────────────
+
+function epubChapterForAudio(audioIdx, totalAudio, totalEpub) {
+  if (!totalEpub) return 0;
+  if (totalAudio <= 1) return 0;
+  return Math.min(Math.floor(audioIdx * totalEpub / totalAudio), totalEpub - 1);
+}
+
+function updateEpubButton() {
+  const book = S.currentBook;
+  const hasEpub = !!(book?.hasEpub || book?.epubPath);
+  toggle($('btn-epub'), hasEpub);
+  $('btn-epub').classList.toggle('epub-active', hasEpub && EPUB.isOpen);
+}
+
+function applyEpubReaderSettings() {
+  const s = EPUB.settings;
+  const reader = $('epub-reader');
+  const scroll = $('epub-scroll');
+  const text = $('epub-text');
+  if (!reader || !text) return;
+
+  reader.style.setProperty('--epub-font',          s.fontFamily);
+  reader.style.setProperty('--epub-size',          s.fontSize + 'px');
+  reader.style.setProperty('--epub-lh',            s.lineHeight);
+  reader.style.setProperty('--epub-ls',            s.letterSpacing + 'px');
+  reader.style.setProperty('--epub-ws',            s.wordSpacing + 'px');
+  reader.style.setProperty('--epub-para-spacing',  s.paragraphSpacing + 'px');
+  reader.style.setProperty('--epub-margin-h',      s.marginH + 'px');
+  reader.style.setProperty('--epub-align',         s.textAlign);
+  reader.style.setProperty('--epub-hyphens',       s.hyphenation ? 'auto' : 'manual');
+  reader.style.setProperty('--epub-col-width',     EPUB_COLUMN_WIDTHS[s.columnWidth] + 'px');
+  reader.style.background = s.bgColor;
+  text.style.color = s.textColor;
+}
+
+function renderEpubChapter(chapterIdx, restoreScroll = true) {
+  if (!EPUB.chapters.length) return;
+  chapterIdx = Math.max(0, Math.min(chapterIdx, EPUB.chapters.length - 1));
+  EPUB.currentChapter = chapterIdx;
+
+  const chapter = EPUB.chapters[chapterIdx];
+  const text = $('epub-text');
+
+  text.innerHTML = chapter.paragraphs.map((para, i) =>
+    `<p class="epub-para" data-idx="${i}">${escHtml(para)}</p>`
+  ).join('');
+
+  // Paragraph click → seek audio to approximate position in chapter
+  text.querySelectorAll('.epub-para').forEach((el, i) => {
+    el.addEventListener('click', () => {
+      const fraction = i / Math.max(chapter.paragraphs.length - 1, 1);
+      if (audio.duration) {
+        audio.currentTime = audio.duration * fraction;
+        if (audio.paused) audio.play().catch(() => {});
+      }
+    });
+  });
+
+  // Update TOC highlight
+  $('epub-toc-list').querySelectorAll('.epub-toc-item').forEach((el, i) => {
+    el.classList.toggle('active', i === chapterIdx);
+    if (i === chapterIdx) el.scrollIntoView({ block: 'nearest' });
+  });
+
+  // Update header
+  const book = S.currentBook;
+  if (book) {
+    $('epub-hdr-book').textContent = book.title;
+    $('epub-hdr-chapter').textContent = chapter.title || `Chapter ${chapterIdx + 1}`;
+  }
+
+  // Update scroll and progress
+  const scroll = $('epub-scroll');
+  if (restoreScroll && EPUB.readingPos[String(chapterIdx)] != null) {
+    scroll.scrollTop = EPUB.readingPos[String(chapterIdx)];
+  } else {
+    scroll.scrollTop = 0;
+  }
+
+  updateEpubProgress();
+  updateEpubTimeEstimate();
+}
+
+function updateEpubProgress() {
+  const scroll = $('epub-scroll');
+  if (!scroll) return;
+  const max = scroll.scrollHeight - scroll.clientHeight;
+  const pct = max > 0 ? (scroll.scrollTop / max) * 100 : 0;
+  const fill = $('epub-progress-fill');
+  if (fill) fill.style.width = pct + '%';
+}
+
+function updateEpubTimeEstimate() {
+  const ch = EPUB.chapters[EPUB.currentChapter];
+  if (!ch) return;
+  const words = ch.paragraphs.join(' ').split(/\s+/).length;
+  const WPM = 250;
+  const mins = Math.ceil(words / WPM);
+  const el = $('epub-time-est');
+  if (el) el.textContent = mins < 60
+    ? `~${mins} min to read`
+    : `~${Math.round(mins / 60 * 10) / 10} hr to read`;
+}
+
+function renderEpubTOC() {
+  const list = $('epub-toc-list');
+  list.innerHTML = EPUB.chapters.map((ch, i) =>
+    `<button class="epub-toc-item${i === EPUB.currentChapter ? ' active' : ''}" data-idx="${i}">${escHtml(ch.title || `Chapter ${i + 1}`)}</button>`
+  ).join('');
+  list.querySelectorAll('.epub-toc-item').forEach(btn => {
+    btn.addEventListener('click', () => renderEpubChapter(parseInt(btn.dataset.idx, 10)));
+  });
+}
+
+async function openEpubReader() {
+  const book = S.currentBook;
+  if (!book) return;
+
+  show($('epub-reader'));
+  EPUB.isOpen = true;
+  updateEpubButton();
+
+  $('epub-hdr-book').textContent = book.title;
+  $('epub-hdr-chapter').textContent = 'Loading…';
+  $('epub-text').innerHTML = '<p class="epub-para" style="color:var(--text-muted)">Loading EPUB…</p>';
+
+  const res = await api.epub.ensureAndParse({
+    bookId: book.id,
+    epubKey: book.epubKey || null,
+  });
+
+  if (res.error) {
+    $('epub-text').innerHTML = `<p class="epub-para" style="color:var(--danger)">${escHtml(res.error)}</p>`;
+    $('epub-hdr-chapter').textContent = 'Error';
+    return;
+  }
+
+  EPUB.chapters = res.chapters;
+
+  // Load reading positions
+  const pos = await api.epub.getReadingPos({ bookId: book.id });
+  EPUB.readingPos = pos || {};
+
+  // Render TOC
+  renderEpubTOC();
+
+  // Figure out which chapter to show (sync with audio chapter)
+  const startChapter = epubChapterForAudio(S.chapterIndex, book.chapters.length, EPUB.chapters.length);
+  renderEpubChapter(startChapter, true);
+
+  applyEpubReaderSettings();
+}
+
+function closeEpubReader() {
+  hide($('epub-reader'));
+  EPUB.isOpen = false;
+  updateEpubButton();
+}
+
+function saveEpubScrollPos() {
+  if (!EPUB.isOpen || !S.currentBook) return;
+  const scroll = $('epub-scroll');
+  if (!scroll) return;
+  EPUB.readingPos[String(EPUB.currentChapter)] = scroll.scrollTop;
+  api.epub.saveReadingPos({
+    bookId: S.currentBook.id,
+    chapterIndex: EPUB.currentChapter,
+    scrollTop: scroll.scrollTop,
+  });
+}
+
+// ── EPUB Settings UI ─────────────────────────────────────────────────────────
+
+function buildEpubSettingsUI() {
+  // Font grid
+  const fontGrid = $('es-font-grid');
+  fontGrid.innerHTML = EPUB_FONTS.map(f =>
+    `<button class="es-font-btn${EPUB.settings.fontFamily === f.value ? ' active' : ''}" data-font="${f.value}" style="font-family:${f.value}">${f.label}</button>`
+  ).join('');
+  fontGrid.querySelectorAll('.es-font-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      EPUB.settings.fontFamily = btn.dataset.font;
+      fontGrid.querySelectorAll('.es-font-btn').forEach(b => b.classList.toggle('active', b === btn));
+      applyEpubReaderSettings();
+      scheduleEpubSettingsSave();
+    });
+  });
+
+  // BG color swatches
+  const bgSwatches = $('es-bg-swatches');
+  bgSwatches.innerHTML = EPUB_BG_PRESETS.map(p =>
+    `<div class="es-swatch${EPUB.settings.bgColor === p.color ? ' active' : ''}" data-color="${p.color}" style="background:${p.color}" title="${p.label}"></div>`
+  ).join('');
+  bgSwatches.querySelectorAll('.es-swatch').forEach(sw => {
+    sw.addEventListener('click', () => {
+      EPUB.settings.bgColor = sw.dataset.color;
+      $('es-bg-color').value = sw.dataset.color;
+      bgSwatches.querySelectorAll('.es-swatch').forEach(s => s.classList.toggle('active', s === sw));
+      applyEpubReaderSettings();
+      scheduleEpubSettingsSave();
+    });
+  });
+
+  // Text color swatches
+  const textSwatches = $('es-text-swatches');
+  textSwatches.innerHTML = EPUB_TEXT_PRESETS.map(p =>
+    `<div class="es-swatch${EPUB.settings.textColor === p.color ? ' active' : ''}" data-color="${p.color}" style="background:${p.color}" title="${p.label}"></div>`
+  ).join('');
+  textSwatches.querySelectorAll('.es-swatch').forEach(sw => {
+    sw.addEventListener('click', () => {
+      EPUB.settings.textColor = sw.dataset.color;
+      $('es-text-color').value = sw.dataset.color;
+      textSwatches.querySelectorAll('.es-swatch').forEach(s => s.classList.toggle('active', s === sw));
+      applyEpubReaderSettings();
+      scheduleEpubSettingsSave();
+    });
+  });
+
+  // Sync sliders to current settings
+  syncEpubSettingsSliders();
+}
+
+function syncEpubSettingsSliders() {
+  const s = EPUB.settings;
+
+  function slider(id, valId, value, suffix) {
+    const el = $(id);
+    const val = $(valId);
+    if (!el || !val) return;
+    el.value = value;
+    val.textContent = (Math.round(value * 100) / 100) + suffix;
+  }
+
+  slider('es-size',   'es-size-val',   s.fontSize,         'px');
+  slider('es-lh',     'es-lh-val',     s.lineHeight,        '');
+  slider('es-ls',     'es-ls-val',     s.letterSpacing,    'px');
+  slider('es-ws',     'es-ws-val',     s.wordSpacing,      'px');
+  slider('es-ps',     'es-ps-val',     s.paragraphSpacing, 'px');
+  slider('es-margin', 'es-margin-val', s.marginH,          'px');
+
+  // Alignment buttons
+  $('es-align-group').querySelectorAll('.es-opt').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.val === s.textAlign);
+  });
+
+  // Column width buttons
+  $('es-width-group').querySelectorAll('.es-opt').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.val === s.columnWidth);
+  });
+
+  // Hyphenation toggle
+  const hyph = $('es-hyphen');
+  hyph.classList.toggle('active', s.hyphenation);
+  hyph.textContent = s.hyphenation ? 'On' : 'Off';
+
+  // Color pickers
+  $('es-bg-color').value = s.bgColor;
+  $('es-text-color').value = s.textColor;
+}
+
+function scheduleEpubSettingsSave() {
+  clearTimeout(EPUB._saveTimer);
+  EPUB._saveTimer = setTimeout(() => {
+    api.epub.saveReaderSettings(EPUB.settings);
+  }, 800);
+}
+
+function openEpubSettings() {
+  buildEpubSettingsUI();
+  show($('epub-settings'));
+}
+function closeEpubSettings() { hide($('epub-settings')); }
+
+// ── Attach EPUB helpers ───────────────────────────────────────────────────────
+
+async function attachEpubToBook(book) {
+  const epubPath = await api.epub.openFilePicker();
+  if (!epubPath) return;
+
+  const isCat = book.isCatalog;
+
+  if (isCat) {
+    let pct = 0;
+    showToast('Uploading EPUB…');
+    api.epub.onUploadProgress(d => {
+      pct = d.progress || 0;
+    });
+    const res = await api.epub.attachCatalog({ bookId: book.id, epubPath });
+    if (res.error) { showToast('Upload failed: ' + res.error, true); return; }
+    // Update in-memory book
+    book.hasEpub = true;
+    book.epubKey = res.epubKey;
+    showToast('EPUB attached to marketplace book.');
+  } else {
+    const res = await api.epub.attachLocal({ bookId: book.id, epubPath });
+    if (res.error) { showToast('Failed: ' + res.error, true); return; }
+    book.hasEpub = true;
+    book.epubPath = epubPath;
+    showToast('EPUB attached to book.');
+  }
+
+  // If this is the currently playing book, show the epub button
+  if (S.currentBook?.id === book.id) {
+    S.currentBook.hasEpub = true;
+    if (isCat) S.currentBook.epubKey = book.epubKey;
+    updateEpubButton();
+  }
+}
+
+// ── EPUB UI setup (called from init) ─────────────────────────────────────────
+
+async function setupEpubUI() {
+  // Load saved settings
+  const saved = await api.epub.getReaderSettings();
+  if (saved) Object.assign(EPUB.settings, saved);
+
+  // btn-epub in player bar
+  $('btn-epub').addEventListener('click', () => {
+    if (EPUB.isOpen) closeEpubReader();
+    else openEpubReader();
+  });
+
+  // Close button
+  $('epub-close-btn').addEventListener('click', () => {
+    saveEpubScrollPos();
+    closeEpubReader();
+  });
+
+  // TOC toggle
+  $('epub-toc-btn').addEventListener('click', () => {
+    EPUB.tocOpen = !EPUB.tocOpen;
+    $('epub-toc').classList.toggle('hidden', !EPUB.tocOpen);
+  });
+
+  // Settings btn
+  $('epub-settings-btn').addEventListener('click', () => {
+    if ($('epub-settings').classList.contains('hidden')) openEpubSettings();
+    else closeEpubSettings();
+  });
+  $('epub-settings-close').addEventListener('click', closeEpubSettings);
+
+  // Settings reset
+  $('epub-settings-reset').addEventListener('click', () => {
+    Object.assign(EPUB.settings, EPUB_DEFAULT_SETTINGS);
+    applyEpubReaderSettings();
+    buildEpubSettingsUI();
+    scheduleEpubSettingsSave();
+  });
+
+  // Sliders
+  function wireSlider(id, valId, suffix, key, transform) {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const v = parseFloat(el.value);
+      EPUB.settings[key] = transform ? transform(v) : v;
+      $(valId).textContent = (Math.round(v * 100) / 100) + suffix;
+      applyEpubReaderSettings();
+      scheduleEpubSettingsSave();
+    });
+  }
+  wireSlider('es-size',   'es-size-val',   'px', 'fontSize',         parseInt);
+  wireSlider('es-lh',     'es-lh-val',     '',   'lineHeight',        parseFloat);
+  wireSlider('es-ls',     'es-ls-val',     'px', 'letterSpacing',     parseFloat);
+  wireSlider('es-ws',     'es-ws-val',     'px', 'wordSpacing',       parseFloat);
+  wireSlider('es-ps',     'es-ps-val',     'px', 'paragraphSpacing',  parseInt);
+  wireSlider('es-margin', 'es-margin-val', 'px', 'marginH',           parseInt);
+
+  // Alignment
+  $('es-align-group').querySelectorAll('.es-opt').forEach(btn => {
+    btn.addEventListener('click', () => {
+      EPUB.settings.textAlign = btn.dataset.val;
+      $('es-align-group').querySelectorAll('.es-opt').forEach(b => b.classList.toggle('active', b === btn));
+      applyEpubReaderSettings();
+      scheduleEpubSettingsSave();
+    });
+  });
+
+  // Column width
+  $('es-width-group').querySelectorAll('.es-opt').forEach(btn => {
+    btn.addEventListener('click', () => {
+      EPUB.settings.columnWidth = btn.dataset.val;
+      $('es-width-group').querySelectorAll('.es-opt').forEach(b => b.classList.toggle('active', b === btn));
+      applyEpubReaderSettings();
+      scheduleEpubSettingsSave();
+    });
+  });
+
+  // Hyphenation toggle
+  $('es-hyphen').addEventListener('click', () => {
+    EPUB.settings.hyphenation = !EPUB.settings.hyphenation;
+    $('es-hyphen').classList.toggle('active', EPUB.settings.hyphenation);
+    $('es-hyphen').textContent = EPUB.settings.hyphenation ? 'On' : 'Off';
+    applyEpubReaderSettings();
+    scheduleEpubSettingsSave();
+  });
+
+  // Color pickers (native input[type=color])
+  $('es-bg-color').addEventListener('input', () => {
+    EPUB.settings.bgColor = $('es-bg-color').value;
+    applyEpubReaderSettings();
+    scheduleEpubSettingsSave();
+  });
+  $('es-text-color').addEventListener('input', () => {
+    EPUB.settings.textColor = $('es-text-color').value;
+    applyEpubReaderSettings();
+    scheduleEpubSettingsSave();
+  });
+
+  // Chapter nav buttons
+  $('epub-prev-ch').addEventListener('click', () => {
+    if (EPUB.currentChapter > 0) {
+      saveEpubScrollPos();
+      renderEpubChapter(EPUB.currentChapter - 1, true);
+    }
+  });
+  $('epub-next-ch').addEventListener('click', () => {
+    if (EPUB.currentChapter < EPUB.chapters.length - 1) {
+      saveEpubScrollPos();
+      renderEpubChapter(EPUB.currentChapter + 1, true);
+    }
+  });
+
+  // Scroll → save position + update progress bar
+  $('epub-scroll').addEventListener('scroll', () => {
+    updateEpubProgress();
+    clearTimeout(EPUB._scrollTimer);
+    EPUB._scrollTimer = setTimeout(saveEpubScrollPos, 600);
   });
 }
 

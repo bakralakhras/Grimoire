@@ -120,6 +120,7 @@ contextBridge.exposeInMainWorld('api', {
     getBook:       (data) => ipcRenderer.invoke('comments:getBook', data),
     create:        (data) => ipcRenderer.invoke('comments:create', data),
     delete:        (data) => ipcRenderer.invoke('comments:delete', data),
+    notifyReached: (data) => ipcRenderer.send('comment:reached', data),
     onSeekRequest: (cb) => {
       ipcRenderer.removeAllListeners('comment:seekTo');
       ipcRenderer.on('comment:seekTo', (_e, data) => cb(data));

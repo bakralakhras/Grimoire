@@ -1247,6 +1247,47 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
 }
 .settings-menu-item:hover { color: var(--text); }
 
+/* ── Toast ─────────────────────────────────────────────────────────────────── */
+.toast {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(22, 22, 38, 0.97);
+  border: 1px solid rgba(124,58,237,0.35);
+  border-radius: 10px;
+  padding: 11px 20px;
+  font-size: 13px;
+  color: var(--text);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+  backdrop-filter: blur(16px);
+  z-index: 9000;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.3s;
+  white-space: nowrap;
+}
+.toast.hidden { opacity: 0; pointer-events: none; }
+.toast.toast-error { border-color: rgba(220,50,50,0.45); color: #fca5a5; }
+.toast.toast-success { border-color: rgba(124,58,237,0.5); }
+
+/* ── Confirm dialog ──────────────────────────────────────────────────────────── */
+.confirm-modal-inner {
+  max-width: 380px;
+  width: 90%;
+}
+.confirm-modal-inner h3 { margin-bottom: 10px; }
+.confirm-body {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.55;
+  margin-bottom: 4px;
+}
+.danger-btn {
+  background: #b91c1c;
+}
+.danger-btn:hover { background: #dc2626; box-shadow: 0 0 16px rgba(185,28,28,0.4); }
+
 /* ── Auth overlay ────────────────────────────────────────────────────────────── */
 #auth-overlay {
   position: fixed; inset: 0; z-index: 500;

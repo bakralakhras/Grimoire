@@ -357,6 +357,21 @@
     <button class="ctx-item danger hidden" id="cat-ctx-delete">✕ Remove from Marketplace</button>
   </div>
 
+  <!-- ── Generic Confirm Dialog ── -->
+  <div id="confirm-modal" class="modal-backdrop hidden">
+    <div class="modal glass confirm-modal-inner">
+      <h3 id="confirm-title">Confirm</h3>
+      <p id="confirm-msg" class="confirm-body"></p>
+      <div class="modal-footer">
+        <button class="btn-ghost" id="confirm-cancel">Cancel</button>
+        <button class="btn-primary danger-btn" id="confirm-ok">Remove</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Toast ── -->
+  <div id="toast" class="toast hidden"></div>
+
   <!-- ── Book Detail Modal ── -->
   <div id="book-detail-modal" class="modal-backdrop hidden">
     <div class="modal glass book-detail-inner">

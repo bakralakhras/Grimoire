@@ -1063,6 +1063,43 @@ function schedulePushProgress() {
   }, 3000);
 }
 
+// ── Toast ─────────────────────────────────────────────────────────────────────
+let _toastTimer = null;
+function showToast(msg, isError = false) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast' + (isError ? ' toast-error' : ' toast-success');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => t.classList.add('hidden'), 3500);
+}
+
+// ── Confirm dialog ────────────────────────────────────────────────────────────
+let _confirmResolve = null;
+function showConfirmDialog(title, body) {
+  return new Promise(resolve => {
+    _confirmResolve = resolve;
+    $('confirm-title').textContent = title;
+    $('confirm-msg').textContent   = body;
+    show($('confirm-modal'));
+  });
+}
+function _confirmSetup() {
+  $('confirm-ok').addEventListener('click', () => {
+    hide($('confirm-modal'));
+    if (_confirmResolve) { _confirmResolve(true); _confirmResolve = null; }
+  });
+  $('confirm-cancel').addEventListener('click', () => {
+    hide($('confirm-modal'));
+    if (_confirmResolve) { _confirmResolve(false); _confirmResolve = null; }
+  });
+  $('confirm-modal').addEventListener('click', e => {
+    if (e.target === $('confirm-modal')) {
+      hide($('confirm-modal'));
+      if (_confirmResolve) { _confirmResolve(false); _confirmResolve = null; }
+    }
+  });
+}
+
 // ── Context menu ──────────────────────────────────────────────────────────────
 async function showContextMenu(e, bookId) {
   e.preventDefault();
@@ -2245,7 +2282,8 @@ function setupCatalogUploadModal() {
     const book = _ctxCatalogBook;
     if (!book) return;
     const res = await api.catalog.addToLibrary({ bookId: book.id });
-    if (res.error) { alert('Error: ' + res.error); return; }
+    if (res.error) { showToast('Error: ' + res.error, true); return; }
+    showToast(`"${book.title}" added to your library.`);
     await loadLibrary();
     if (_catalogCache) _renderCatalogContent(_catalogCache);
   });
@@ -2289,16 +2327,38 @@ function setupCatalogUploadModal() {
     hideCatalogContextMenu();
     const book = _ctxCatalogBook;
     if (!book) return;
-    if (!confirm(`Remove "${book.title}" from the Marketplace? This will permanently delete all audio files from S3.`)) return;
+
+    const confirmed = await showConfirmDialog(
+      'Remove from Marketplace',
+      `Are you sure you want to remove "${book.title}" from the marketplace? This cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    // Remove card from DOM immediately for instant feedback
+    const card = document.querySelector(`.catalog-browse-card[data-id="${book.id}"]`);
+    if (card) card.remove();
+
     const res = await api.catalog.deleteBook({ bookId: book.id });
-    if (res.error) { alert('Error: ' + res.error); return; }
+    if (res.error) {
+      showToast('Error removing book: ' + res.error, true);
+      // Restore the view since removal failed
+      _catalogCache = null;
+      renderCatalog(true);
+      return;
+    }
+
     // Remove from local library if present
     const libBook = S.books.find(b => b.isCatalog && b.catalogId === book.id);
     if (libBook) S.books = S.books.filter(b => b !== libBook);
     _catalogCache = null;
+
+    showToast(`"${book.title}" removed from the marketplace.`);
     renderCatalog(true);
     renderLibrary();
   });
+
+  // Wire up the generic confirm dialog buttons
+  _confirmSetup();
 }
 
 // ── S3 settings ────────────────────────────────────────────────────────────────

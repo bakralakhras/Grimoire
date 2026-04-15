@@ -1,3 +1,4 @@
+require('dotenv').config();
 const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -677,6 +678,68 @@ async function flushQueue() {
   setSyncStatus(failed.length === 0 ? 'synced' : 'offline', lastError);
 }
 
+// ── Catalog cover cache (download once via Node, serve as local path) ─────────
+
+function catalogCoverCacheDir() { return path.join(app.getPath('userData'), 'catalog-covers'); }
+
+function catalogCoverCachePath(bookId, s3Key) {
+  const ext = path.extname(s3Key).toLowerCase() || '.jpg';
+  return path.join(catalogCoverCacheDir(), `${bookId}${ext}`);
+}
+
+// Generate a presigned/signed URL for a catalog S3 object.
+// Primary: Supabase Storage (uses auth JWT, no IAM creds needed in packaged exe).
+// Fallback: AWS SDK presigned URL (needs valid credentials in s3-config.json or hardcoded).
+async function catalogSignedUrl(bucket, s3Key, expiresIn) {
+  if (supabase && bucket && s3Key) {
+    try {
+      const { data, error } = await supabase.storage.from(bucket).createSignedUrl(s3Key, expiresIn);
+      if (!error && data?.signedUrl) {
+        dbg('catalogSignedUrl: Supabase Storage OK | key =', s3Key);
+        return data.signedUrl;
+      }
+      dbg('catalogSignedUrl: Supabase Storage failed | key =', s3Key, '| error =', error?.message);
+    } catch (e) {
+      dbg('catalogSignedUrl: Supabase Storage exception | key =', s3Key, '| error =', e.message);
+    }
+  }
+  const cfg = loadS3Config();
+  if (!cfg?.accessKeyId) throw new Error('S3 not configured and Supabase Storage unavailable');
+  dbg('catalogSignedUrl: AWS SDK fallback | key =', s3Key, '| accessKeyId =', cfg.accessKeyId);
+  const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+  const { GetObjectCommand } = require('@aws-sdk/client-s3');
+  const url = await getSignedUrl(
+    createS3Client(cfg),
+    new GetObjectCommand({ Bucket: cfg.bucket, Key: s3Key }),
+    { expiresIn }
+  );
+  dbg('catalogSignedUrl: AWS SDK URL generated (first 80) =', url.slice(0, 80));
+  return url;
+}
+
+// Returns a local file path to the cover, downloading it if not cached yet.
+// Uses Node's https (same path that works for audio), so no browser-side URL issue.
+async function resolveCoverPath(bookId, coverS3Key, cfg) {
+  if (!bookId || !coverS3Key) return null;
+  const cachePath = catalogCoverCachePath(bookId, coverS3Key);
+  if (fs.existsSync(cachePath)) {
+    dbg('resolveCoverPath: cache hit | bookId =', bookId);
+    return cachePath;
+  }
+  try {
+    ensureDir(catalogCoverCacheDir());
+    const bucket = cfg?.bucket || 'grimoire-library';
+    dbg('resolveCoverPath: downloading cover | bookId =', bookId, '| key =', coverS3Key);
+    const url = await catalogSignedUrl(bucket, coverS3Key, 7200);
+    await downloadToFile(url, cachePath);
+    dbg('resolveCoverPath: cover cached at', cachePath);
+    return cachePath;
+  } catch (e) {
+    dbg('resolveCoverPath: failed -', e.message);
+    return null;
+  }
+}
+
 // ── S3 helpers ────────────────────────────────────────────────────────────────
 
 function s3ConfigPath() { return path.join(app.getPath('userData'), 's3-config.json'); }
@@ -691,13 +754,13 @@ function loadS3Config() {
   } catch (e) {
     dbg('loadS3Config: file read error -', e.message);
   }
-  // Default credentials (user can override in settings)
-  dbg('loadS3Config: using hardcoded-fallback credentials (no s3-config.json found)');
+  // Default credentials from environment variables
+  dbg('loadS3Config: using env-var credentials (no s3-config.json found)');
   return {
-    region: 'us-east-1',
-    bucket: 'grimoire-library',
-    accessKeyId: 'AKIAW44VDXKCMRWZPVX5',
-    secretAccessKey: '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',
+    region: process.env.AWS_REGION || 'us-east-1',
+    bucket: process.env.AWS_BUCKET || 'grimoire-library',
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   };
 }
 
@@ -2822,38 +2885,7 @@ function registerIPC() {
     new Notification({ title: 'Grimoire', body: `${username || 'Unknown'}: ${text || ''}` }).show();
   });
 
-  // Generate a presigned/signed URL for a catalog object.
-  // Primary path: Supabase Storage createSignedUrl (uses auth JWT — no IAM credentials needed,
-  //   works for all users in the packaged exe without a local s3-config.json).
-  // Fallback: AWS SDK presigned URL (requires valid IAM credentials in s3-config.json or hardcoded).
-  async function catalogSignedUrl(bucket, s3Key, expiresIn) {
-    // 1. Try Supabase Storage (auth-JWT-based, credential-free for the client)
-    if (supabase && bucket && s3Key) {
-      try {
-        const { data, error } = await supabase.storage.from(bucket).createSignedUrl(s3Key, expiresIn);
-        if (!error && data?.signedUrl) {
-          dbg('catalogSignedUrl: Supabase Storage OK | key =', s3Key);
-          return data.signedUrl;
-        }
-        dbg('catalogSignedUrl: Supabase Storage failed | key =', s3Key, '| error =', error?.message);
-      } catch (e) {
-        dbg('catalogSignedUrl: Supabase Storage exception | key =', s3Key, '| error =', e.message);
-      }
-    }
-    // 2. Fall back to AWS SDK presigned URL (requires IAM credentials)
-    const cfg = loadS3Config();
-    if (!cfg?.accessKeyId) throw new Error('S3 not configured and Supabase Storage unavailable');
-    dbg('catalogSignedUrl: falling back to AWS SDK | key =', s3Key, '| bucket =', cfg.bucket, '| accessKeyId =', cfg.accessKeyId);
-    const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-    const { GetObjectCommand } = require('@aws-sdk/client-s3');
-    const url = await getSignedUrl(
-      createS3Client(cfg),
-      new GetObjectCommand({ Bucket: cfg.bucket, Key: s3Key }),
-      { expiresIn }
-    );
-    dbg('catalogSignedUrl: AWS SDK presigned URL generated (first 80 chars) =', url.slice(0, 80));
-    return url;
-  }
+  // catalogSignedUrl is defined at module top level (needed by resolveCoverPath)
 
   async function catalogCoverUrl(coverS3Key, cfg) {
     if (!coverS3Key) return null;
@@ -2988,7 +3020,10 @@ function registerIPC() {
       const cfg = loadS3Config();
       const result = await Promise.all(books.map(async b => {
         dbg('catalog:getAll: book id =', b.id, '| cover_s3_key =', b.cover_s3_key, '| s3_prefix =', b.s3_prefix);
-        return { ...b, coverUrl: await catalogCoverUrl(b.cover_s3_key, cfg) };
+        // Download cover to local cache via Node (avoids browser-side URL issues).
+        // Return as coverPath so the renderer can use pathToUrl() on it.
+        const coverPath = await resolveCoverPath(b.id, b.cover_s3_key, cfg);
+        return { ...b, coverPath, coverUrl: null };
       }));
       return { books: result };
     } catch (e) { dbg('catalog:getAll: exception -', e.message); return { error: e.message }; }

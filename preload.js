@@ -17,6 +17,15 @@ contextBridge.exposeInMainWorld('api', {
   getBook:      (id)     => ipcRenderer.invoke('library:getBook', id),
   deleteBook:   (id)     => ipcRenderer.invoke('library:delete', id),
   renameBook:   (data)   => ipcRenderer.invoke('library:rename', data),
+  collections: {
+    getAll:      ()       => ipcRenderer.invoke('collections:getAll'),
+    create:      (data)   => ipcRenderer.invoke('collections:create', data),
+    rename:      (data)   => ipcRenderer.invoke('collections:rename', data),
+    delete:      (data)   => ipcRenderer.invoke('collections:delete', data),
+    updateBooks: (data)   => ipcRenderer.invoke('collections:updateBooks', data),
+    setCover:    (data)   => ipcRenderer.invoke('collections:setCover', data),
+    removeCover: (data)   => ipcRenderer.invoke('collections:removeCover', data),
+  },
   setCover:      (bookId) => ipcRenderer.invoke('book:setCover', bookId),
   setBackground: (bookId) => ipcRenderer.invoke('book:setBackground', bookId),
 
@@ -53,6 +62,7 @@ contextBridge.exposeInMainWorld('api', {
   // Chapter splitting
   detectSilences: (bookId, opts) => ipcRenderer.invoke('book:detectSilences', { bookId, ...opts }),
   splitAtPoints:  (bookId, splitPoints) => ipcRenderer.invoke('book:splitAtPoints', { bookId, splitPoints }),
+  splitReplaceCatalogChapters: (bookId, splitPoints) => ipcRenderer.invoke('catalog:splitReplaceChapters', { bookId, splitPoints }),
   onSplitProgress: (cb) => {
     ipcRenderer.removeAllListeners('split:progress');
     ipcRenderer.on('split:progress', (_e, data) => cb(data));
@@ -85,9 +95,19 @@ contextBridge.exposeInMainWorld('api', {
     upload:            (data)  => ipcRenderer.invoke('catalog:upload', data),
     editBook:          (data)  => ipcRenderer.invoke('catalog:editBook', data),
     deleteBook:        (data)  => ipcRenderer.invoke('catalog:deleteBook', data),
+    splitReplaceChapters: (data) => ipcRenderer.invoke('catalog:splitReplaceChapters', data),
     onUploadProgress:  (cb) => {
       ipcRenderer.removeAllListeners('catalog:uploadProgress');
       ipcRenderer.on('catalog:uploadProgress', (_e, data) => cb(data));
+    },
+    cancelDownload:    (data) => ipcRenderer.invoke('catalog:cancelDownload', data),
+    download:          (data) => ipcRenderer.invoke('catalog:download', data),
+    removeLocalFiles:  (data) => ipcRenderer.invoke('catalog:removeLocalFiles', data),
+    redownload:        (data) => ipcRenderer.invoke('catalog:redownload', data),
+    getDownloadState:  (data) => ipcRenderer.invoke('catalog:getDownloadState', data),
+    onDownloadProgress: (cb) => {
+      ipcRenderer.removeAllListeners('catalog:downloadProgress');
+      ipcRenderer.on('catalog:downloadProgress', (_e, data) => cb(data));
     },
   },
 
@@ -105,6 +125,16 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.removeAllListeners('epub:uploadProgress');
       ipcRenderer.on('epub:uploadProgress', (_e, data) => cb(data));
     },
+  },
+
+  // Auto-update
+  update: {
+    getVersion:   ()   => ipcRenderer.invoke('update:getVersion'),
+    download:     ()   => ipcRenderer.invoke('update:download'),
+    install:      ()   => ipcRenderer.invoke('update:install'),
+    onAvailable:  (cb) => ipcRenderer.on('update:available',  (_e, d) => cb(d)),
+    onProgress:   (cb) => ipcRenderer.on('update:progress',   (_e, d) => cb(d)),
+    onDownloaded: (cb) => ipcRenderer.on('update:downloaded', (_e, d) => cb(d)),
   },
 
   // Auth

@@ -266,6 +266,17 @@ body.epub-hide-audio-panels #bookmarks-sidebar {
 }
 .view-title { font-size: 28px; font-weight: 400; letter-spacing: -0.01em; }
 .view-header-actions { display: flex; align-items: center; gap: 10px; }
+.library-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.collection-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
 .search-wrap {
   display: flex;
@@ -319,6 +330,78 @@ body.epub-hide-audio-panels #bookmarks-sidebar {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 16px;
+}
+.collection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.collection-card {
+  background: rgba(14, 14, 24, 0.75);
+  border: 1px solid rgba(124,58,237,0.10);
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.collection-card:hover {
+  border-color: rgba(124,58,237,0.36);
+  transform: translateY(-3px);
+  box-shadow: 0 12px 28px rgba(0,0,0,0.4), 0 0 24px rgba(124,58,237,0.10);
+}
+.collection-cover {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: linear-gradient(145deg, rgba(124,58,237,0.18), rgba(24,24,36,0.92));
+  position: relative;
+  overflow: hidden;
+}
+.collection-cover.custom-cover {
+  background-size: cover;
+  background-position: center;
+}
+.collection-cover-collage {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  width: 100%;
+  height: 100%;
+}
+.collection-cover-tile {
+  background-size: cover;
+  background-position: center;
+}
+.collection-cover-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: rgba(255,255,255,0.9);
+}
+.collection-cover-folder {
+  font-size: 32px;
+}
+.collection-cover-initials {
+  font-family: 'Instrument Serif', serif;
+  font-size: 26px;
+  letter-spacing: -0.03em;
+}
+.collection-card-info {
+  padding: 12px 13px 13px;
+}
+.collection-card-title {
+  font-family: 'Instrument Serif', serif;
+  font-size: 15px;
+  color: var(--text);
+  margin-bottom: 5px;
+}
+.collection-card-meta {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 .book-card {
   background: rgba(14, 14, 24, 0.75);
@@ -387,6 +470,76 @@ body.epub-hide-audio-panels #bookmarks-sidebar {
   text-transform: uppercase;
   padding: 2px 7px;
   border-radius: 20px;
+}
+.collection-manage-modal {
+  width: min(720px, 92vw);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+}
+.collection-manage-copy {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+.collection-manage-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+.collection-manage-row {
+  display: grid;
+  grid-template-columns: auto 48px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.02);
+}
+.collection-manage-thumb {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  background-size: cover;
+  background-position: center;
+  background-color: rgba(255,255,255,0.05);
+}
+.collection-manage-info {
+  min-width: 0;
+}
+.collection-manage-name {
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.collection-manage-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: 3px;
+}
+.collection-manage-order {
+  display: flex;
+  gap: 6px;
+}
+.collection-manage-order button {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.collection-manage-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
 }
 
 /* ── Empty state ────────────────────────────────────────────────────────────── */
@@ -518,8 +671,12 @@ body.epub-hide-audio-panels #bookmarks-sidebar {
   border-radius: 2px;
   position: relative;
   cursor: pointer;
+  touch-action: none;
 }
 .seek-track:hover { background: rgba(255,255,255,0.12); }
+.seek-track.seeking {
+  background: rgba(255,255,255,0.14);
+}
 .seek-fill {
   position: absolute; left: 0; top: 0; height: 100%;
   background: var(--accent); border-radius: 2px;
@@ -534,6 +691,7 @@ body.epub-hide-audio-panels #bookmarks-sidebar {
   transition: transform 0.15s ease;
 }
 .seek-track:hover .seek-thumb { transform: translate(-50%, -50%) scale(1); }
+.seek-track.seeking .seek-thumb { transform: translate(-50%, -50%) scale(1); }
 
 .seek-comment-dot {
   position: absolute; top: 50%;
@@ -546,6 +704,10 @@ body.epub-hide-audio-panels #bookmarks-sidebar {
   padding: 0;
   z-index: 5;
   transition: transform 0.12s ease;
+}
+.seek-comment-dot:focus-visible {
+  outline: 2px solid rgba(255,255,255,0.65);
+  outline-offset: 2px;
 }
 .seek-comment-dot:hover { transform: translate(-50%, -50%) scale(1.4); }
 
@@ -613,7 +775,7 @@ body.epub-hide-audio-panels #bookmarks-sidebar {
   bottom: calc(var(--bar-h) + 14px);
   left: 50%;
   transform: translateX(-50%);
-  width: 400px;
+  width: min(460px, calc(100vw - 28px));
   background: rgba(12, 10, 20, 0.88);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -623,17 +785,96 @@ body.epub-hide-audio-panels #bookmarks-sidebar {
   z-index: 300;
   box-shadow: 0 6px 28px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(124, 58, 237, 0.08);
 }
+.comment-drop-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.comment-drop-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.comment-drop-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+}
 .comment-drop-input {
   width: 100%;
-  background: transparent;
-  border: none;
+  min-height: 84px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
   outline: none;
   color: var(--text);
   font-size: 13px;
   font-family: 'DM Sans', sans-serif;
   caret-color: var(--accent);
+  padding: 10px 12px;
+  resize: vertical;
+}
+.comment-drop-input:focus {
+  border-color: rgba(124, 58, 237, 0.55);
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.12);
 }
 .comment-drop-input::placeholder { color: var(--text-muted); }
+.comment-drop-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+.comment-detail-popup {
+  position: fixed;
+  width: min(360px, calc(100vw - 24px));
+  background: rgba(12, 10, 20, 0.96);
+  border: 1px solid rgba(124, 58, 237, 0.4);
+  border-radius: 12px;
+  padding: 14px;
+  z-index: 320;
+  box-shadow: 0 14px 40px rgba(0,0,0,0.42);
+}
+.comment-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.comment-detail-user {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.comment-detail-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.comment-detail-close {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  font-size: 18px;
+  line-height: 1;
+}
+.comment-detail-text {
+  margin-top: 12px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.comment-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
 
 .pb-right { display: flex; align-items: center; gap: 10px; min-width: 200px; justify-content: flex-end; }
 .vol-wrap { display: flex; align-items: center; gap: 6px; color: var(--text-muted); }
@@ -1288,6 +1529,46 @@ input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.2); }
   flex: 1; font-size: 12px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.app-version-label {
+  font-size: 10px; color: var(--text-dim);
+  text-align: center; margin: 4px 0 0;
+  letter-spacing: 0.04em; pointer-events: none; user-select: none;
+}
+
+/* ── Update notification bar ─────────────────────────────────────────────────── */
+.update-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 14px 7px 16px;
+  background: rgba(124,58,237,0.14);
+  border-bottom: 1px solid rgba(124,58,237,0.28);
+  font-size: 12px; color: var(--text-muted);
+  flex-shrink: 0;
+}
+.update-bar-actions { display: flex; align-items: center; gap: 8px; flex: 1; flex-wrap: wrap; }
+#update-bar-msg { color: var(--text); font-weight: 500; white-space: nowrap; }
+.update-bar-btn {
+  padding: 3px 10px; border-radius: 10px; font-size: 11px;
+  background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.14);
+  color: var(--text-muted); cursor: pointer; font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.update-bar-btn:hover { background: rgba(255,255,255,0.14); color: var(--text); }
+.update-bar-btn-primary {
+  background: rgba(124,58,237,0.25); border-color: rgba(124,58,237,0.5);
+  color: var(--accent-dim);
+}
+.update-bar-btn-primary:hover { background: rgba(124,58,237,0.42); color: #fff; }
+.update-bar-progress { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.update-bar-dismiss {
+  margin-left: auto; flex-shrink: 0;
+  width: 20px; height: 20px;
+  background: transparent; border: none;
+  color: var(--text-dim); cursor: pointer; font-size: 11px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 4px; transition: color 0.15s;
+}
+.update-bar-dismiss:hover { color: var(--text); }
 
 /* ── Settings popup ──────────────────────────────────────────────────────────── */
 .settings-popup {
@@ -1371,6 +1652,31 @@ body.epub-focus-mode .epub-reader {
 .epub-hdr-meta  { display: flex; flex-direction: column; min-width: 0; }
 .epub-hdr-book  { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .epub-hdr-chapter { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.epub-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(124,58,237,0.14);
+  background: rgba(7,7,14,0.92);
+  flex-shrink: 0;
+}
+.epub-search.hidden { display: none; }
+.epub-search input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid rgba(124,58,237,0.2);
+  background: rgba(255,255,255,0.03);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: inherit;
+}
+.epub-search-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
 
 /* Reading progress bar */
 .epub-progress-track {
@@ -1428,14 +1734,6 @@ body.epub-focus-mode .epub-reader:focus-within .epub-progress-track {
 .epub-toc-list {
   flex: 1; overflow-y: auto; padding: 0 6px 16px;
 }
-.epub-toc-group-label {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  padding: 12px 10px 6px;
-}
 .epub-toc-item {
   display: block; width: 100%;
   padding: 7px 10px; border: none;
@@ -1447,10 +1745,6 @@ body.epub-focus-mode .epub-reader:focus-within .epub-progress-track {
 }
 .epub-toc-item:hover { background: rgba(124,58,237,0.1); color: var(--text); }
 .epub-toc-item.active { background: rgba(124,58,237,0.18); color: var(--accent); font-weight: 500; }
-.epub-toc-item-front,
-.epub-toc-item-back {
-  color: var(--text-muted);
-}
 
 /* Scroll area */
 .epub-scroll {
@@ -1485,10 +1779,6 @@ body.epub-focus-mode .epub-reader:focus-within .epub-progress-track {
 .epub-section.active .epub-section-title {
   color: var(--accent);
 }
-.epub-section-frontMatter .epub-section-title,
-.epub-section-backMatter .epub-section-title {
-  color: var(--text-dim);
-}
 .epub-section-title {
   font-size: 24px;
   font-weight: 400;
@@ -1508,6 +1798,14 @@ body.epub-focus-mode .epub-reader:focus-within .epub-progress-track {
 .epub-para.active {
   background: rgba(124,58,237,0.18);
   outline: 1px solid rgba(124,58,237,0.35);
+}
+.epub-para.epub-search-match {
+  background: rgba(255, 214, 10, 0.09);
+  outline: 1px solid rgba(255, 214, 10, 0.14);
+}
+.epub-para.epub-search-current {
+  background: rgba(255, 214, 10, 0.18);
+  outline: 1px solid rgba(255, 214, 10, 0.45);
 }
 
 /* Chapter navigation */
@@ -1817,6 +2115,166 @@ body.epub-focus-mode .epub-reader:focus-within .epub-progress-track {
   font-size: 12px; color: var(--text-dim);
   margin-top: 8px; min-height: 18px; text-align: center;
 }
+
+/* ── Card download-progress overlay ─────────────────────────────────────────── */
+.book-dl-overlay {
+  position: absolute; inset: 0;
+  background: rgba(6, 6, 14, 0.78);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 3px;
+  border-radius: inherit;
+  pointer-events: all;
+}
+.book-dl-ring {
+  width: 46px; height: 46px;
+  overflow: visible;
+}
+.ring-track {
+  fill: none; stroke: rgba(255,255,255,0.12); stroke-width: 3;
+}
+.ring-fill {
+  fill: none; stroke: var(--accent); stroke-width: 3;
+  stroke-linecap: round;
+  transform: rotate(-90deg); transform-origin: 50% 50%;
+  transition: stroke-dashoffset 0.35s ease;
+}
+.book-dl-pct {
+  font-size: 10px; color: rgba(255,255,255,0.75);
+  font-variant-numeric: tabular-nums; line-height: 1;
+}
+.book-dl-label {
+  font-size: 9px; color: rgba(255,255,255,0.42);
+  letter-spacing: 0.04em; text-transform: uppercase;
+}
+.book-dl-cancel-btn {
+  position: absolute; top: 6px; right: 6px;
+  width: 20px; height: 20px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 50%; color: rgba(255,255,255,0.55);
+  font-size: 9px; cursor: pointer; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+.book-dl-cancel-btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
+.book-dl-error-state { background: rgba(20, 6, 6, 0.82); }
+.book-dl-err-icon {
+  font-size: 22px; color: #fca5a5; line-height: 1;
+}
+.book-dl-retry-btn {
+  margin-top: 4px;
+  padding: 3px 10px;
+  background: rgba(124,58,237,0.25);
+  border: 1px solid rgba(124,58,237,0.4);
+  border-radius: 10px; color: var(--accent-dim);
+  font-size: 10px; cursor: pointer;
+  transition: background 0.15s;
+}
+.book-dl-retry-btn:hover { background: rgba(124,58,237,0.45); color: #fff; }
+.book-card.is-downloading { border-color: rgba(124,58,237,0.3); }
+
+/* ── Cloud-download badge on library cards (catalog books not yet downloaded) ── */
+.catalog-cloud-badge {
+  position: absolute;
+  top: 6px; left: 6px;
+  width: 22px; height: 22px;
+  background: rgba(10, 10, 20, 0.72);
+  border: 1px solid rgba(124,58,237,0.35);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: rgba(200,180,255,0.85);
+  pointer-events: none;
+}
+
+/* ── Catalog card action button (Play / Download / Add) ─────────────────────── */
+.cat-card-action-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-top: 6px; padding: 4px 10px;
+  border-radius: 10px; font-size: 11px; font-family: inherit;
+  cursor: pointer; border: 1px solid transparent;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+.cat-card-action-btn.play-btn {
+  background: rgba(124,58,237,0.2); border-color: rgba(124,58,237,0.45);
+  color: var(--accent-dim);
+}
+.cat-card-action-btn.play-btn:hover { background: rgba(124,58,237,0.38); color: #fff; }
+.cat-card-action-btn.download-btn {
+  background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.18);
+  color: var(--text-muted);
+}
+.cat-card-action-btn.download-btn:hover { background: rgba(255,255,255,0.12); color: var(--text); }
+.cat-card-action-btn.add-btn {
+  background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.12);
+  color: var(--text-dim);
+}
+.cat-card-action-btn.add-btn:hover { background: rgba(255,255,255,0.09); color: var(--text-muted); }
+
+/* ── Catalog download progress modal ─────────────────────────────────────────── */
+.dl-modal-box {
+  width: 400px; max-width: 94vw;
+  background: var(--surface); border-radius: 14px;
+  border: 1px solid var(--border);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  overflow: hidden;
+}
+.dl-modal-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 16px 16px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.dl-modal-cover {
+  width: 52px; height: 52px; flex-shrink: 0;
+  border-radius: 6px;
+  background: var(--surface-2);
+  background-size: cover; background-position: center;
+  overflow: hidden;
+}
+.dl-modal-info { flex: 1; min-width: 0; }
+.dl-modal-title {
+  font-size: 14px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin: 0 0 2px;
+}
+.dl-modal-sub { font-size: 12px; color: var(--text-muted); margin: 0; }
+.dl-modal-controls { display: flex; gap: 6px; flex-shrink: 0; }
+.dl-ctrl-btn {
+  width: 24px; height: 24px;
+  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 50%; color: var(--text-muted);
+  font-size: 11px; cursor: pointer; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+.dl-ctrl-btn:hover { background: rgba(255,255,255,0.14); color: var(--text); }
+.dl-modal-body { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.dl-file-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 12px; color: var(--text-muted);
+}
+.dl-file-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.dl-file-bytes { flex-shrink: 0; font-size: 11px; color: var(--text-dim); }
+.dl-progress-track {
+  width: 100%; height: 5px;
+  background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden;
+}
+.dl-progress-fill {
+  height: 100%; background: var(--accent);
+  border-radius: 3px; transition: width 0.3s ease; width: 0%;
+}
+.dl-overall-track { margin-top: 2px; }
+.dl-overall-row {
+  display: flex; justify-content: space-between;
+  font-size: 11px; color: var(--text-dim);
+}
+.dl-total-mb { flex-shrink: 0; }
+.dl-error-section {
+  padding: 16px; text-align: center;
+  border-top: 1px solid var(--border);
+}
+.dl-error-text { font-size: 13px; color: #fca5a5; margin: 0 0 12px; }
 
 /* ── S3 settings modal ───────────────────────────────────────────────────────── */
 .s3-modal-desc { font-size: 13px; color: var(--text-muted); margin-bottom: 18px; }

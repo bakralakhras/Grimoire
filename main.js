@@ -35,10 +35,10 @@ function loadDb() {
     const file = dbPath();
     if (fs.existsSync(file)) {
       const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-      return { books: {}, playback: {}, bookmarks: {}, cloudBooks: {}, ...data };
+      return { books: {}, playback: {}, bookmarks: {}, cloudBooks: {}, collections: {}, ...data };
     }
   } catch (e) { console.error('Load error:', e); }
-  return { books: {}, playback: {}, bookmarks: {}, cloudBooks: {} };
+  return { books: {}, playback: {}, bookmarks: {}, cloudBooks: {}, collections: {} };
 }
 
 function saveDb() {
@@ -46,8 +46,74 @@ function saveDb() {
   catch (e) { console.error('Save error:', e); }
 }
 
+// ── Device downloads store (per-device, not synced to Supabase) ──────────────
+
+function deviceDownloadsPath() {
+  return path.join(app.getPath('userData'), 'device-downloads.json');
+}
+
+function loadDeviceDownloads() {
+  try {
+    const file = deviceDownloadsPath();
+    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {}
+  return {};
+}
+
+function saveDeviceDownloads(data) {
+  try { fs.writeFileSync(deviceDownloadsPath(), JSON.stringify(data, null, 2)); } catch {}
+}
+
+function getDeviceDownload(bookId) {
+  return loadDeviceDownloads()[String(bookId)] || null;
+}
+
+function setDeviceDownload(bookId, record) {
+  const data = loadDeviceDownloads();
+  data[String(bookId)] = record;
+  saveDeviceDownloads(data);
+}
+
+function clearDeviceDownload(bookId) {
+  const data = loadDeviceDownloads();
+  delete data[String(bookId)];
+  saveDeviceDownloads(data);
+}
+
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function collectionCoverRootDir() {
+  return path.join(app.getPath('userData'), 'collection-covers');
+}
+
+function normalizeCollectionRecord(collection) {
+  return {
+    id: collection.id,
+    name: collection.name || 'Untitled Collection',
+    bookIds: Array.isArray(collection.bookIds) ? collection.bookIds.map(String) : [],
+    coverPath: collection.coverPath || null,
+    createdAt: collection.createdAt || new Date().toISOString(),
+    updatedAt: collection.updatedAt || collection.createdAt || new Date().toISOString(),
+  };
+}
+
+function collectionSort(a, b) {
+  return String(a.name || '').localeCompare(String(b.name || '')) || String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''));
+}
+
+function saveCollectionRecord(collection) {
+  const normalized = normalizeCollectionRecord(collection);
+  db.collections[normalized.id] = normalized;
+  saveDb();
+  return normalized;
+}
+
+function removeCollectionCoverFile(collection) {
+  const target = collection?.coverPath;
+  if (!target) return;
+  try { if (fs.existsSync(target)) fs.unlinkSync(target); } catch {}
 }
 
 function managedLibraryRootDir() {
@@ -56,6 +122,10 @@ function managedLibraryRootDir() {
 
 function managedCatalogBookDir(bookId) {
   return path.join(managedLibraryRootDir(), String(bookId));
+}
+
+function catalogDownloadDir(bookId) {
+  return path.join(app.getPath('userData'), 'Downloads', String(bookId));
 }
 
 function isPathInside(root, target) {
@@ -93,6 +163,10 @@ function deleteBookRecord(bookId, { cleanupManaged = false } = {}) {
   delete db.books[bookId];
   delete db.playback[bookId];
   delete db.bookmarks[bookId];
+  for (const [collectionId, collection] of Object.entries(db.collections || {})) {
+    if (!Array.isArray(collection?.bookIds)) continue;
+    db.collections[collectionId].bookIds = collection.bookIds.filter(id => String(id) !== String(bookId));
+  }
   saveDb();
   return true;
 }
@@ -181,6 +255,70 @@ function epubInvalidationSignature(book) {
     epubKey: book?.epubKey || null,
   }));
   return hash.digest('hex');
+}
+
+function orderedChapterFilenames(chapters = []) {
+  return (chapters || []).map(ch => String(ch?.filename || '').trim()).filter(Boolean);
+}
+
+function catalogStructureHashFromParts({ s3Prefix = null, chapterCount = 0, filenames = [] } = {}) {
+  const raw = JSON.stringify({
+    s3Prefix: s3Prefix || '',
+    chapterCount: Number(chapterCount) || 0,
+    filenames: filenames.map(name => String(name || '').trim()),
+  });
+  let hash = 2166136261;
+  for (let i = 0; i < raw.length; i++) {
+    hash ^= raw.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `struct-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+function catalogStructurePayload({ s3Prefix = null, chapters = [], chapterCount = null, updatedAt = null } = {}) {
+  const normalizedChapters = (chapters || []).map((chapter, index) => ({
+    filename: String(chapter?.filename || '').trim(),
+    title: String(chapter?.title || chapterTitle(chapter?.filename || `Chapter ${index + 1}`)),
+    duration: normalizeOptionalNumber(chapter?.duration) ?? 0,
+  })).filter(chapter => chapter.filename);
+  const normalizedChapterCount = normalizeOptionalNumber(chapterCount) ?? normalizedChapters.length;
+  return {
+    updatedAt: updatedAt || new Date().toISOString(),
+    s3Prefix: s3Prefix || null,
+    chapterCount: normalizedChapterCount,
+    chapters: normalizedChapters,
+    filenames: orderedChapterFilenames(normalizedChapters),
+    structureHash: catalogStructureHashFromParts({
+      s3Prefix,
+      chapterCount: normalizedChapterCount,
+      filenames: orderedChapterFilenames(normalizedChapters),
+    }),
+  };
+}
+
+function catalogStructureFromRow(row = {}) {
+  const payload = catalogStructurePayload({
+    s3Prefix: row?.s3_prefix || row?.s3Prefix || null,
+    chapterCount: row?.chapter_count ?? row?.chapterCount ?? null,
+    chapters: row?.chapters || [],
+    updatedAt: row?.updated_at || row?.updatedAt || null,
+  });
+  return {
+    ...payload,
+    structureHash: row?.structure_hash || row?.structureHash || payload.structureHash,
+  };
+}
+
+function catalogDownloadRecordIsCurrent(record, catalogRow) {
+  if (!record || !catalogRow) return false;
+  const structure = catalogStructureFromRow(catalogRow);
+  const storedFilenames = (record.chapter_filenames || []).map(name => String(name || '').trim()).filter(Boolean);
+  return !!record.local_path
+    && (record.structure_hash || null) === (structure.structureHash || null)
+    && (record.s3_prefix || null) === (structure.s3Prefix || null)
+    && Number(record.chapter_count || 0) === Number(structure.chapterCount || 0)
+    && storedFilenames.length === structure.filenames.length
+    && storedFilenames.every((filename, index) => filename === structure.filenames[index]);
 }
 
 function buildSmartSyncMeta(book, overrides = {}) {
@@ -299,6 +437,70 @@ function publicJobState(job) {
     error: job.error || null,
     pid: job.pid || null,
     cacheHit: !!job.cacheHit,
+  };
+}
+
+async function resolveAudioBook(bookId, { requireSingleFile = false } = {}) {
+  const localBook = db.books[bookId];
+  if (localBook) {
+    if (requireSingleFile && localBook.chapters?.length !== 1) {
+      return { error: 'Book must have exactly one file' };
+    }
+    return { book: localBook, source: 'library' };
+  }
+
+  const download = getDeviceDownload(bookId);
+  const localPath = download?.local_path;
+  if (!localPath || !fs.existsSync(localPath)) {
+    return { error: 'Book not found' };
+  }
+
+  if (!supabase) {
+    return { error: 'Catalog metadata unavailable' };
+  }
+
+  let catBook;
+  try {
+    const { data, error } = await supabase
+      .from('catalog')
+      .select('*')
+      .eq('id', bookId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error('Catalog book not found');
+    catBook = data;
+  } catch (error) {
+    return { error: error.message || 'Catalog book not found' };
+  }
+
+  const chapters = (catBook.chapters || []).map((ch, i) => ({
+    id: i,
+    filename: ch.filename,
+    filepath: path.join(localPath, ch.filename),
+    title: ch.title || `Chapter ${i + 1}`,
+    duration: ch.duration || 0,
+  }));
+
+  if (requireSingleFile && chapters.length !== 1) {
+    return { error: 'Book must have exactly one file' };
+  }
+
+  return {
+    source: 'catalog-download',
+    book: {
+      id: catBook.id,
+      title: catBook.title,
+      author: catBook.author || '',
+      folderPath: localPath,
+      localPath,
+      chapterCount: catBook.chapter_count || chapters.length,
+      chapters,
+      sourceCatalogId: catBook.id,
+      isCatalog: true,
+      downloadedLocally: true,
+    },
+    catalog: catBook,
+    download,
   };
 }
 
@@ -628,13 +830,41 @@ function setSyncStatus(status, detail = '') {
   mainWindow?.webContents.send('sync:status', { status, detail });
 }
 
+function progressTimestamp(value) {
+  const ts = new Date(value || 0).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function normalizeProgressRecord(record, fallbackBookId = null) {
+  if (!record) return null;
+
+  const bookId = String(record.book_id ?? record.bookId ?? fallbackBookId ?? '');
+  if (!bookId) return null;
+
+  return {
+    bookId,
+    chapterIndex: normalizeOptionalNumber(record.chapter_index ?? record.chapterIndex) ?? 0,
+    position: normalizeOptionalNumber(record.position) ?? 0,
+    speed: normalizeOptionalNumber(record.speed) ?? 1,
+    updatedAt: record.updated_at || record.updatedAt || new Date(0).toISOString(),
+  };
+}
+
+function chooseNewestProgress(localRecord, remoteRecord) {
+  const local = normalizeProgressRecord(localRecord);
+  const remote = normalizeProgressRecord(remoteRecord, local?.bookId);
+  if (!local) return remote;
+  if (!remote) return local;
+  return progressTimestamp(local.updatedAt) >= progressTimestamp(remote.updatedAt) ? local : remote;
+}
+
 async function doSync(op) {
   try {
     if (op.type === 'progress') {
       const { error } = await supabase.from('progress').upsert({
         user_id: currentUser.id, book_id: op.bookId, book_title: op.bookTitle || '',
         chapter_index: op.chapterIndex, position: op.position, speed: op.speed,
-        updated_at: new Date().toISOString(),
+        updated_at: op.updatedAt || new Date().toISOString(),
       }, { onConflict: 'user_id,book_id' });
       if (error) throw error;
     } else if (op.type === 'bookmark_upsert') {
@@ -682,9 +912,8 @@ async function flushQueue() {
 
 function catalogCoverCacheDir() { return path.join(app.getPath('userData'), 'catalog-covers'); }
 
-function catalogCoverCachePath(bookId, s3Key) {
-  const ext = path.extname(s3Key).toLowerCase() || '.jpg';
-  return path.join(catalogCoverCacheDir(), `${bookId}${ext}`);
+function catalogCoverCachePath(bookId) {
+  return path.join(catalogCoverCacheDir(), `${bookId}.jpg`);
 }
 
 // Generate a presigned/signed URL for a catalog S3 object.
@@ -718,20 +947,19 @@ async function catalogSignedUrl(bucket, s3Key, expiresIn) {
 }
 
 // Returns a local file path to the cover, downloading it if not cached yet.
-// Uses Node's https (same path that works for audio), so no browser-side URL issue.
-async function resolveCoverPath(bookId, coverS3Key, cfg) {
-  if (!bookId || !coverS3Key) return null;
-  const cachePath = catalogCoverCachePath(bookId, coverS3Key);
+// Cover art is always public: https://grimoire-library.s3.us-east-1.amazonaws.com/catalog/{id}/cover.jpg
+async function resolveCoverPath(bookId) {
+  if (!bookId) return null;
+  const cachePath = catalogCoverCachePath(bookId);
   if (fs.existsSync(cachePath)) {
     dbg('resolveCoverPath: cache hit | bookId =', bookId);
     return cachePath;
   }
   try {
     ensureDir(catalogCoverCacheDir());
-    const bucket = cfg?.bucket || 'grimoire-library';
-    dbg('resolveCoverPath: downloading cover | bookId =', bookId, '| key =', coverS3Key);
-    const url = await catalogSignedUrl(bucket, coverS3Key, 7200);
-    await downloadToFile(url, cachePath);
+    const publicUrl = `https://grimoire-library.s3.us-east-1.amazonaws.com/catalog/${bookId}/cover.jpg`;
+    dbg('resolveCoverPath: downloading cover | bookId =', bookId);
+    await downloadToFile(publicUrl, cachePath);
     dbg('resolveCoverPath: cover cached at', cachePath);
     return cachePath;
   } catch (e) {
@@ -745,23 +973,28 @@ async function resolveCoverPath(bookId, coverS3Key, cfg) {
 function s3ConfigPath() { return path.join(app.getPath('userData'), 's3-config.json'); }
 
 function loadS3Config() {
+  // Start with file config as a base (may be stale/old)
+  let fileCfg = {};
   try {
     if (fs.existsSync(s3ConfigPath())) {
-      const cfg = JSON.parse(fs.readFileSync(s3ConfigPath(), 'utf8'));
-      dbg('loadS3Config: using file config | accessKeyId =', cfg.accessKeyId, '| bucket =', cfg.bucket, '| region =', cfg.region);
-      return cfg;
+      fileCfg = JSON.parse(fs.readFileSync(s3ConfigPath(), 'utf8'));
+      dbg('loadS3Config: read file config | accessKeyId =', fileCfg.accessKeyId);
     }
   } catch (e) {
     dbg('loadS3Config: file read error -', e.message);
   }
-  // Default credentials from environment variables
-  dbg('loadS3Config: using env-var credentials (no s3-config.json found)');
-  return {
-    region: process.env.AWS_REGION || 'us-east-1',
-    bucket: process.env.AWS_BUCKET || 'grimoire-library',
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+
+  // Env vars always override the saved file — this is the authoritative source
+  const cfg = {
+    region:          process.env.AWS_REGION          || fileCfg.region          || 'us-east-1',
+    bucket:          process.env.AWS_BUCKET          || fileCfg.bucket          || 'grimoire-library',
+    accessKeyId:     process.env.AWS_ACCESS_KEY_ID   || fileCfg.accessKeyId,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || fileCfg.secretAccessKey,
   };
+
+  const source = process.env.AWS_ACCESS_KEY_ID ? 'env (.env file)' : (fileCfg.accessKeyId ? 'file (s3-config.json)' : 'none');
+  dbg('loadS3Config: source =', source, '| accessKeyId =', cfg.accessKeyId, '| bucket =', cfg.bucket, '| region =', cfg.region);
+  return cfg;
 }
 
 function saveS3Config(cfg) {
@@ -882,7 +1115,31 @@ function chapterTitle(filename) {
 
 // ── EPUB helpers ─────────────────────────────────────────────────────────────
 
-function downloadToFile(url, dest) {
+function probeContentLength(url, redirectsLeft = 5) {
+  return new Promise(resolve => {
+    if (!url || redirectsLeft < 0) { resolve(0); return; }
+    const https = require('https');
+    const http  = require('http');
+    const mod   = url.startsWith('https') ? https : http;
+    const req = mod.request(url, { method: 'HEAD' }, res => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+        const next = res.headers.location;
+        res.resume();
+        if (!next) { resolve(0); return; }
+        probeContentLength(next, redirectsLeft - 1).then(resolve);
+        return;
+      }
+      const total = Math.max(0, Number(res.headers['content-length']) || 0);
+      res.resume();
+      resolve(total);
+    });
+    req.on('error', () => resolve(0));
+    req.end();
+  });
+}
+
+function downloadToFile(url, dest, opts = {}) {
+  const { onProgress } = opts;
   return new Promise((resolve, reject) => {
     const https = require('https');
     const http  = require('http');
@@ -897,7 +1154,7 @@ function downloadToFile(url, dest) {
       if (res.statusCode === 301 || res.statusCode === 302) {
         file.close();
         try { fs.unlinkSync(dest); } catch {}
-        downloadToFile(res.headers.location, dest).then(resolve).catch(reject);
+        downloadToFile(res.headers.location, dest, opts).then(resolve).catch(reject);
         return;
       }
       if (res.statusCode !== 200) {
@@ -914,6 +1171,13 @@ function downloadToFile(url, dest) {
         res.on('error', err => { file.close(); try { fs.unlinkSync(dest); } catch {} reject(err); });
         return;
       }
+      const total = Math.max(0, Number(res.headers['content-length']) || 0);
+      let loaded = 0;
+      if (onProgress) onProgress({ loaded, total });
+      res.on('data', chunk => {
+        loaded += chunk.length;
+        if (onProgress) onProgress({ loaded, total });
+      });
       res.pipe(file);
       file.on('finish', () => file.close(resolve));
       file.on('error', err => { try { fs.unlinkSync(dest); } catch {} reject(err); });
@@ -1421,6 +1685,73 @@ function normalizeEpubChapters(parsed, targetCount, audioChapters = [], bookTitl
 
 // ── App setup ────────────────────────────────────────────────────────────────
 
+// Required on Windows for notifications to appear in the Action Center
+// Dev: use execPath so Windows registers notifications under the electron process.
+// Packaged: use the real app ID that matches the NSIS installer.
+if (process.platform === 'win32') {
+  app.setAppUserModelId(app.isPackaged ? 'com.grimoire.app' : process.execPath);
+}
+
+// ── Auto-updater ──────────────────────────────────────────────────────────────
+// Only active in packaged builds (electron-updater checks GitHub Releases).
+// userData (AppData/Roaming/Grimoire) is NEVER touched by the installer or
+// updater — electron-builder NSIS only writes to the app installation directory.
+
+function initAutoUpdater() {
+  if (!app.isPackaged) {
+    dbg('autoUpdater: skipped in dev mode');
+    return;
+  }
+  let autoUpdater;
+  try {
+    ({ autoUpdater } = require('electron-updater'));
+  } catch (e) {
+    dbg('autoUpdater: electron-updater not available -', e.message);
+    return;
+  }
+
+  autoUpdater.autoDownload        = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.logger = { info: (...a) => dbg('[updater]', ...a), warn: (...a) => dbg('[updater]', ...a), error: (...a) => dbg('[updater]', ...a), debug: () => {} };
+
+  autoUpdater.on('update-available', info => {
+    dbg('autoUpdater: update available -', info.version);
+    mainWindow?.webContents.send('update:available', { version: info.version });
+  });
+
+  autoUpdater.on('download-progress', progress => {
+    mainWindow?.webContents.send('update:progress', {
+      percent: Math.round(progress.percent),
+      transferred: progress.transferred,
+      total: progress.total,
+      bytesPerSecond: progress.bytesPerSecond,
+    });
+  });
+
+  autoUpdater.on('update-downloaded', info => {
+    dbg('autoUpdater: download complete -', info.version);
+    mainWindow?.webContents.send('update:downloaded', { version: info.version });
+  });
+
+  autoUpdater.on('error', err => {
+    dbg('autoUpdater: error -', err.message);
+    // Silent — don't surface update errors to the user
+  });
+
+  // Check once 4 seconds after launch so startup isn't blocked
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch(e => dbg('autoUpdater: checkForUpdates failed -', e.message));
+  }, 4000);
+
+  ipcMain.handle('update:download', () =>
+    autoUpdater.downloadUpdate().catch(e => ({ error: e.message }))
+  );
+
+  ipcMain.handle('update:install', () => {
+    autoUpdater.quitAndInstall(false, true);
+  });
+}
+
 app.whenReady().then(async () => {
   db = loadDb();
   initSupabase();
@@ -1428,13 +1759,15 @@ app.whenReady().then(async () => {
   const s3cfgExists = fs.existsSync(s3ConfigPath());
   dbg('startup: s3-config.json present =', s3cfgExists);
   const _startCfg = loadS3Config();
-  dbg('startup: s3 config source =', s3cfgExists ? 'file' : 'hardcoded-fallback',
-    '| accessKeyId =', _startCfg.accessKeyId, '| bucket =', _startCfg.bucket, '| region =', _startCfg.region);
+  const _keyPreview = _startCfg.accessKeyId ? _startCfg.accessKeyId.slice(0, 8) + '...' : '(none)';
+  const _cfgSource  = process.env.AWS_ACCESS_KEY_ID ? 'env (.env file)' : (s3cfgExists ? 'file (s3-config.json)' : 'none');
+  console.log('[Grimoire] S3 credentials loaded from:', _cfgSource, '| key prefix:', _keyPreview, '| bucket:', _startCfg.bucket);
   loadQueue();
   setAuthSkipped(false); // clear any stale skip state — auth is now required
   await loadSession();
   createWindow();
   registerIPC();
+  initAutoUpdater();
   setInterval(flushQueue, 30_000);
 });
 
@@ -1462,7 +1795,13 @@ function createWindow() {
 
 // ── IPC ──────────────────────────────────────────────────────────────────────
 
+// Tracks in-flight catalog downloads so they can be cancelled
+const _downloadCancelRefs = new Map();
+
 function registerIPC() {
+  // App version (always available, packaged or dev)
+  ipcMain.handle('update:getVersion', () => app.getVersion());
+
   // Window controls
   ipcMain.on('window:minimize', () => mainWindow.minimize());
   ipcMain.on('window:maximize', () =>
@@ -1484,7 +1823,7 @@ function registerIPC() {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
       properties: ['openFile'],
       title: 'Select Cover Image',
-      filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp'] }],
+      filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'] }],
     });
     return canceled ? null : filePaths[0];
   });
@@ -1571,6 +1910,88 @@ function registerIPC() {
   ipcMain.handle('library:rename', (_e, { bookId, title }) => {
     if (db.books[bookId]) { db.books[bookId].title = title; saveDb(); }
     return true;
+  });
+
+  ipcMain.handle('collections:getAll', () =>
+    Object.values(db.collections || {})
+      .map(normalizeCollectionRecord)
+      .sort(collectionSort)
+  );
+
+  ipcMain.handle('collections:create', (_e, { name }) => {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return { error: 'Collection name is required.' };
+    const collection = saveCollectionRecord({
+      id: crypto.randomUUID(),
+      name: trimmed,
+      bookIds: [],
+      coverPath: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    return { collection };
+  });
+
+  ipcMain.handle('collections:rename', (_e, { collectionId, name }) => {
+    const existing = db.collections?.[collectionId];
+    const trimmed = String(name || '').trim();
+    if (!existing) return { error: 'Collection not found.' };
+    if (!trimmed) return { error: 'Collection name is required.' };
+    const collection = saveCollectionRecord({
+      ...existing,
+      name: trimmed,
+      updatedAt: new Date().toISOString(),
+    });
+    return { collection };
+  });
+
+  ipcMain.handle('collections:delete', (_e, { collectionId }) => {
+    const existing = db.collections?.[collectionId];
+    if (!existing) return { error: 'Collection not found.' };
+    removeCollectionCoverFile(existing);
+    delete db.collections[collectionId];
+    saveDb();
+    return { success: true };
+  });
+
+  ipcMain.handle('collections:updateBooks', (_e, { collectionId, bookIds }) => {
+    const existing = db.collections?.[collectionId];
+    if (!existing) return { error: 'Collection not found.' };
+    const collection = saveCollectionRecord({
+      ...existing,
+      bookIds: Array.from(new Set((bookIds || []).map(String))),
+      updatedAt: new Date().toISOString(),
+    });
+    return { collection };
+  });
+
+  ipcMain.handle('collections:setCover', (_e, { collectionId, sourcePath }) => {
+    const existing = db.collections?.[collectionId];
+    if (!existing) return { error: 'Collection not found.' };
+    if (!sourcePath || !fs.existsSync(sourcePath)) return { error: 'Cover image not found.' };
+    ensureDir(collectionCoverRootDir());
+    const ext = path.extname(sourcePath) || '.png';
+    const dest = path.join(collectionCoverRootDir(), `${collectionId}${ext}`);
+    removeCollectionCoverFile(existing);
+    fs.copyFileSync(sourcePath, dest);
+    const collection = saveCollectionRecord({
+      ...existing,
+      coverPath: dest,
+      updatedAt: new Date().toISOString(),
+    });
+    return { collection };
+  });
+
+  ipcMain.handle('collections:removeCover', (_e, { collectionId }) => {
+    const existing = db.collections?.[collectionId];
+    if (!existing) return { error: 'Collection not found.' };
+    removeCollectionCoverFile(existing);
+    const collection = saveCollectionRecord({
+      ...existing,
+      coverPath: null,
+      updatedAt: new Date().toISOString(),
+    });
+    return { collection };
   });
 
   // Set cover art — opens image picker, copies file into userData/covers/
@@ -1770,8 +2191,9 @@ function registerIPC() {
   }
 
   async function runSmartSyncJob(bookId) {
-    const book = db.books[bookId];
-    if (!book) return { error: 'Book not found' };
+    const resolved = await resolveAudioBook(bookId);
+    if (resolved.error) return { error: resolved.error };
+    const book = resolved.book;
 
     const existing = smartSyncJobs.get(bookId);
     if (existing && (existing.status === 'queued' || existing.status === 'running')) {
@@ -2115,8 +2537,9 @@ function registerIPC() {
   });
 
   ipcMain.handle('book:transcribe:legacy', async (event, bookId) => {
-    const book = db.books[bookId];
-    if (!book) return { error: 'Book not found' };
+    const resolved = await resolveAudioBook(bookId);
+    if (resolved.error) return { error: resolved.error };
+    const book = resolved.book;
 
     let ffmpegPath;
     try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
@@ -2225,10 +2648,151 @@ function registerIPC() {
 
   // ── Chapter splitting ────────────────────────────────────────────────────
 
+  async function splitBookIntoChapterFolder(book, splitPoints, onProgress = null) {
+    let ffmpegPath;
+    try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
+    catch (e) { return { error: 'ffmpeg not available: ' + e.message }; }
+
+    const sourceFile = book.chapters[0].filepath;
+    const sourceDir  = path.dirname(sourceFile);
+    const sourceName = path.basename(sourceFile, path.extname(sourceFile));
+    const sourceExt  = path.extname(sourceFile);
+    const outDir = path.join(sourceDir, `${sourceName} - Chapters`);
+
+    if (fs.existsSync(outDir)) {
+      try { fs.rmSync(outDir, { recursive: true, force: true }); } catch {}
+    }
+    fs.mkdirSync(outDir, { recursive: true });
+
+    const starts = [0, ...(splitPoints || [])];
+    const total  = starts.length;
+
+    for (let i = 0; i < total; i++) {
+      const segStart = starts[i];
+      const segEnd   = i < total - 1 ? starts[i + 1] : null;
+      const chNum    = String(i + 1).padStart(3, '0');
+      const outFile  = path.join(outDir, `Chapter ${chNum}${sourceExt}`);
+
+      onProgress?.({
+        type: 'splitting',
+        current: i + 1,
+        total,
+        message: `Splitting chapter ${i + 1} of ${total}…`,
+      });
+
+      const args = ['-y', '-ss', String(segStart), '-i', sourceFile];
+      if (segEnd !== null) args.push('-t', String(segEnd - segStart));
+      args.push('-c', 'copy', '-avoid_negative_ts', '1', outFile);
+
+      try {
+        const { code, stderr } = await spawnAsync(ffmpegPath, args);
+        if (code !== 0) return { error: `Chapter ${i + 1} failed: ${stderr.slice(-300)}` };
+      } catch (e) {
+        return { error: `Chapter ${i + 1} failed: ${e.message}` };
+      }
+    }
+
+    const audioExts = new Set(['.mp3', '.mp4', '.m4b', '.m4a', '.aac', '.ogg', '.wav', '.flac', '.opus']);
+    const newFiles = fs.readdirSync(outDir)
+      .filter(f => audioExts.has(path.extname(f).toLowerCase()))
+      .sort(naturalSort);
+
+    return {
+      outDir,
+      chapters: newFiles.map((filename, idx) => ({
+        id: idx,
+        filename,
+        filepath: path.join(outDir, filename),
+        title: chapterTitle(filename),
+        duration: 0,
+      })),
+    };
+  }
+
+  async function uploadCatalogChapterFolder({ folderPath, s3Prefix, event }) {
+    const cfg = loadS3Config();
+    if (!cfg?.accessKeyId) return { error: 'S3 not configured' };
+
+    const audioExts = new Set(['.mp3', '.mp4', '.m4b', '.m4a', '.aac', '.ogg', '.wav', '.flac', '.opus']);
+    let files;
+    try {
+      files = fs.readdirSync(folderPath)
+        .filter(f => audioExts.has(path.extname(f).toLowerCase()))
+        .sort(naturalSort);
+    } catch (e) { return { error: 'Cannot read folder: ' + e.message }; }
+    if (!files.length) return { error: 'No audio files found in this folder.' };
+
+    const { Upload } = require('@aws-sdk/lib-storage');
+    const s3 = createS3Client(cfg);
+
+    for (let i = 0; i < files.length; i++) {
+      const filename = files[i];
+      event?.sender.send('split:progress', {
+        type: 'uploading',
+        current: i,
+        total: files.length,
+        message: `Uploading ${filename}…`,
+      });
+      try {
+        const uploader = new Upload({
+          client: s3,
+          params: { Bucket: cfg.bucket, Key: `${s3Prefix}${filename}`, Body: fs.createReadStream(path.join(folderPath, filename)) },
+        });
+        uploader.on('httpUploadProgress', ({ loaded, total }) => {
+          const progress = total ? (i + (loaded / total)) : i;
+          event?.sender.send('split:progress', {
+            type: 'uploading',
+            current: progress,
+            total: files.length,
+            message: `Uploading ${filename}…`,
+          });
+        });
+        await uploader.done();
+      } catch (e) {
+        return { error: `Failed to upload ${filename}: ${e.message}` };
+      }
+    }
+
+    return {
+      files,
+      chapters: files.map((filename, index) => ({ filename, title: chapterTitle(filename), duration: 0 })),
+    };
+  }
+
+  async function verifyCatalogObjectsExist(s3Prefix, filenames = []) {
+    const cfg = loadS3Config();
+    if (!cfg?.accessKeyId) return { error: 'S3 not configured' };
+    const { HeadObjectCommand } = require('@aws-sdk/client-s3');
+    const s3 = createS3Client(cfg);
+    for (const filename of filenames) {
+      try {
+        await s3.send(new HeadObjectCommand({ Bucket: cfg.bucket, Key: `${s3Prefix}${filename}` }));
+      } catch (error) {
+        return { error: `Uploaded file verification failed for ${filename}: ${error.message}` };
+      }
+    }
+    return { success: true };
+  }
+
+  async function updateCatalogStructureRow(bookId, structure) {
+    const { error } = await supabase.from('catalog').update({
+      s3_prefix: structure.s3Prefix,
+      chapter_count: structure.chapterCount,
+      chapters: structure.chapters,
+      updated_at: structure.updatedAt,
+      structure_hash: structure.structureHash,
+    }).eq('id', bookId);
+    if (!error) return { success: true };
+    if (isUnknownColumnError(error)) {
+      return { error: 'Catalog schema is missing updated_at or structure_hash. Run the catalog structure migration first.' };
+    }
+    return { error: error.message };
+  }
+
   ipcMain.handle('book:detectSilences', async (event, { bookId, silenceDuration, noiseFloor }) => {
-    const book = db.books[bookId];
-    if (!book) return { error: 'Book not found' };
-    if (book.chapters.length !== 1) return { error: 'Book must have exactly one file' };
+    const resolved = await resolveAudioBook(bookId, { requireSingleFile: true });
+    if (resolved.error) return { error: resolved.error };
+    const book = resolved.book;
 
     let ffmpegPath;
     try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
@@ -2282,69 +2846,134 @@ function registerIPC() {
   });
 
   ipcMain.handle('book:splitAtPoints', async (event, { bookId, splitPoints }) => {
-    const book = db.books[bookId];
-    if (!book) return { error: 'Book not found' };
+    const resolved = await resolveAudioBook(bookId, { requireSingleFile: true });
+    if (resolved.error) return { error: resolved.error };
+    const book = resolved.book;
+    const splitResult = await splitBookIntoChapterFolder(book, splitPoints, data => event.sender.send('split:progress', data));
+    if (splitResult.error) return splitResult;
 
-    let ffmpegPath;
-    try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
-    catch (e) { return { error: 'ffmpeg not available: ' + e.message }; }
+    event.sender.send('split:progress', { type: 'importing', message: 'Updating library...' });
+    const { outDir, chapters } = splitResult;
 
-    const sourceFile = book.chapters[0].filepath;
-    const sourceDir  = path.dirname(sourceFile);
-    const sourceName = path.basename(sourceFile, path.extname(sourceFile));
-    const sourceExt  = path.extname(sourceFile);
-    const outDir = path.join(sourceDir, `${sourceName} - Chapters`);
+    const storedBook = db.books[bookId] || {};
+    const nextBook = {
+      ...storedBook,
+      id: bookId,
+      title: storedBook.title || book.title,
+      author: storedBook.author || book.author || '',
+      folderPath: outDir,
+      chapterCount: chapters.length,
+      chapters,
+      addedAt: storedBook.addedAt || new Date().toISOString(),
+      sourceCatalogId: storedBook.sourceCatalogId || resolved.catalog?.id || book.sourceCatalogId || null,
+      managedFolder: storedBook.managedFolder || false,
+    };
+    if (storedBook.coverPath) nextBook.coverPath = storedBook.coverPath;
+    if (storedBook.bgPath) nextBook.bgPath = storedBook.bgPath;
+    if (storedBook.epubPath) nextBook.epubPath = storedBook.epubPath;
 
-    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
-
-    // Build ordered segment list: start times from [0, ...splitPoints]
-    const starts = [0, ...splitPoints];
-    const total  = starts.length;
-
-    for (let i = 0; i < total; i++) {
-      const segStart = starts[i];
-      const segEnd   = i < total - 1 ? starts[i + 1] : null;
-      const chNum    = String(i + 1).padStart(3, '0');
-      const outFile  = path.join(outDir, `Chapter ${chNum}${sourceExt}`);
-
-      event.sender.send('split:progress', {
-        type: 'splitting', current: i + 1, total,
-        message: `Splitting chapter ${i + 1} of ${total}…`,
-      });
-
-      const args = ['-y', '-ss', String(segStart), '-i', sourceFile];
-      if (segEnd !== null) args.push('-t', String(segEnd - segStart));
-      args.push('-c', 'copy', '-avoid_negative_ts', '1', outFile);
-
-      try {
-        const { code, stderr } = await spawnAsync(ffmpegPath, args);
-        if (code !== 0) return { error: `Chapter ${i + 1} failed: ${stderr.slice(-300)}` };
-      } catch (e) {
-        return { error: `Chapter ${i + 1} failed: ${e.message}` };
-      }
-    }
-
-    event.sender.send('split:progress', { type: 'importing', message: 'Updating library…' });
-
-    const audioExts = new Set(['.mp3', '.mp4', '.m4b', '.m4a', '.aac', '.ogg', '.wav', '.flac', '.opus']);
-    const newFiles = fs.readdirSync(outDir)
-      .filter(f => audioExts.has(path.extname(f).toLowerCase()))
-      .sort(naturalSort);
-
-    const chapters = newFiles.map((filename, idx) => ({
-      id: idx, filename,
-      filepath: path.join(outDir, filename),
-      title: chapterTitle(filename),
-      duration: 0,
-    }));
-
-    book.folderPath  = outDir;
-    book.chapters    = chapters;
-    book.chapterCount = chapters.length;
+    db.books[bookId] = nextBook;
     delete db.playback[bookId];
     saveDb();
 
-    return { ...book, playback: null, chaptersCreated: chapters.length };
+    return { ...nextBook, playback: null, chaptersCreated: chapters.length };
+  });
+
+  ipcMain.handle('catalog:splitReplaceChapters', async (event, { bookId, splitPoints }) => {
+    if (!supabase || !currentUser) return { error: 'Not authenticated' };
+    try {
+      const catBook = await ensureCatalogOwnership(bookId);
+      const resolved = await resolveAudioBook(bookId, { requireSingleFile: true });
+      if (resolved.error) return { error: resolved.error };
+
+      const splitResult = await splitBookIntoChapterFolder(resolved.book, splitPoints, data => event.sender.send('split:progress', data));
+      if (splitResult.error) return splitResult;
+
+      const replacementPrefix = `catalog/${bookId}/replace-${Date.now()}/`;
+      event.sender.send('split:progress', { type: 'publishing', message: 'Preparing replacement catalog structure...' });
+
+      const uploadResult = await uploadCatalogChapterFolder({
+        folderPath: splitResult.outDir,
+        s3Prefix: replacementPrefix,
+        event,
+      });
+      if (uploadResult.error) return uploadResult;
+
+      event.sender.send('split:progress', { type: 'publishing', message: 'Verifying uploaded chapter files...' });
+      const verifyResult = await verifyCatalogObjectsExist(replacementPrefix, uploadResult.files);
+      if (verifyResult.error) return verifyResult;
+
+      const structure = catalogStructurePayload({
+        s3Prefix: replacementPrefix,
+        chapterCount: uploadResult.files.length,
+        chapters: uploadResult.chapters,
+      });
+
+      event.sender.send('split:progress', { type: 'publishing', message: 'Updating catalog metadata...' });
+      const updateResult = await updateCatalogStructureRow(bookId, structure);
+      if (updateResult.error) return updateResult;
+
+      let totalSize = 0;
+      for (const chapter of splitResult.chapters) {
+        try { totalSize += fs.statSync(chapter.filepath).size; } catch {}
+      }
+      const storedBook = db.books[bookId] || {};
+      const existingDownload = getDeviceDownload(bookId) || {};
+      const preservedCoverPath = storedBook.coverPath || existingDownload.cover_path || null;
+      const preservedCoverUrl = storedBook.coverUrl || catalogCoverUrl(bookId);
+      setDeviceDownload(bookId, {
+        ...existingDownload,
+        book_id: String(bookId),
+        local_path: splitResult.outDir,
+        downloaded_at: new Date().toISOString(),
+        file_count: splitResult.chapters.length,
+        total_size: totalSize,
+        cover_path: preservedCoverPath,
+        s3_prefix: structure.s3Prefix,
+        structure_hash: structure.structureHash,
+        chapter_count: structure.chapterCount,
+        chapter_filenames: structure.filenames,
+      });
+
+      const localBook = {
+        ...storedBook,
+        id: String(bookId),
+        title: catBook.title,
+        author: catBook.author || storedBook.author || '',
+        series: catBook.series || storedBook.series || null,
+        seriesOrder: catBook.series_order || storedBook.seriesOrder || null,
+        folderPath: splitResult.outDir,
+        chapterCount: splitResult.chapters.length,
+        chapters: splitResult.chapters,
+        addedAt: storedBook.addedAt || new Date().toISOString(),
+        catalogId: String(bookId),
+        sourceCatalogId: String(bookId),
+        s3Prefix: structure.s3Prefix,
+        structureHash: structure.structureHash,
+        catalogUpdatedAt: structure.updatedAt,
+        uploadedBy: catBook.uploaded_by || currentUser.id,
+        coverPath: preservedCoverPath,
+        coverUrl: preservedCoverUrl,
+        isCatalog: false,
+        isCloudOnly: false,
+      };
+      if (storedBook.bgPath) localBook.bgPath = storedBook.bgPath;
+      if (storedBook.epubPath) localBook.epubPath = storedBook.epubPath;
+      if (storedBook.epubKey) localBook.epubKey = storedBook.epubKey;
+      if (storedBook.hasEpub != null) localBook.hasEpub = storedBook.hasEpub;
+      db.books[bookId] = localBook;
+      saveDb();
+
+      return {
+        success: true,
+        chaptersCreated: splitResult.chapters.length,
+        localBook: { ...localBook, playback: db.playback[bookId] || null },
+        structureHash: structure.structureHash,
+        updatedAt: structure.updatedAt,
+      };
+    } catch (error) {
+      return { error: error.message };
+    }
   });
 
   ipcMain.handle('transcript:get', (_e, bookId) => {
@@ -2368,8 +2997,9 @@ function registerIPC() {
   // AI chapter detection — sliding-window scan via detect_chapters.py
   // Transcribes a short clip every stepSeconds and checks for "chapter" in the text.
   ipcMain.handle('book:detectChaptersAI', async (event, { bookId, stepSeconds = 480 }) => {
-    const book = db.books[bookId];
-    if (!book) return { error: 'book_not_found', message: 'Book not found' };
+    const resolved = await resolveAudioBook(bookId, { requireSingleFile: true });
+    if (resolved.error) return { error: 'book_not_found', message: resolved.error };
+    const book = resolved.book;
 
     let ffmpegPath;
     try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
@@ -2456,9 +3086,9 @@ function registerIPC() {
 
   // Known chapter count — detect ALL silences, rank by duration, keep top N-1.
   ipcMain.handle('book:detectByCount', async (event, { bookId, chapterCount }) => {
-    const book = db.books[bookId];
-    if (!book) return { error: 'Book not found' };
-    if (book.chapters.length !== 1) return { error: 'Book must have exactly one file' };
+    const resolved = await resolveAudioBook(bookId, { requireSingleFile: true });
+    if (resolved.error) return { error: resolved.error };
+    const book = resolved.book;
 
     let ffmpegPath;
     try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; }
@@ -2638,12 +3268,38 @@ function registerIPC() {
       ]);
       if (pRes.error) throw pRes.error;
 
-      // Merge progress: remote wins (applies to both local and cloud-only books)
+      const progressPushes = [];
       for (const r of pRes.data || []) {
-        db.playback[r.book_id] = {
-          chapterIndex: r.chapter_index, position: r.position,
-          speed: r.speed, updatedAt: r.updated_at,
-        };
+        const bookId = String(r.book_id);
+        const localProgress = normalizeProgressRecord(db.playback[bookId], bookId);
+        const remoteProgress = normalizeProgressRecord(r, bookId);
+        const resolvedProgress = chooseNewestProgress(localProgress, remoteProgress);
+
+        if (resolvedProgress) {
+          db.playback[bookId] = {
+            chapterIndex: resolvedProgress.chapterIndex,
+            position: resolvedProgress.position,
+            speed: resolvedProgress.speed,
+            updatedAt: resolvedProgress.updatedAt,
+          };
+        }
+
+        if (
+          localProgress
+          && resolvedProgress
+          && resolvedProgress.updatedAt === localProgress.updatedAt
+          && progressTimestamp(localProgress.updatedAt) > progressTimestamp(remoteProgress?.updatedAt)
+        ) {
+          progressPushes.push({
+            type: 'progress',
+            bookId,
+            bookTitle: db.books[bookId]?.title || r.book_title || '',
+            chapterIndex: localProgress.chapterIndex,
+            position: localProgress.position,
+            speed: localProgress.speed,
+            updatedAt: localProgress.updatedAt,
+          });
+        }
       }
       // Merge bookmarks: add remote entries missing locally
       for (const r of bRes.data || []) {
@@ -2664,6 +3320,14 @@ function registerIPC() {
       }
 
       saveDb();
+      for (const op of progressPushes) {
+        const res = await doSync(op);
+        if (!res.ok) {
+          offlineQueue = offlineQueue.filter(q => !(q.type === 'progress' && q.bookId === op.bookId));
+          offlineQueue.push(op);
+        }
+      }
+      saveQueue();
       setSyncStatus('synced');
       return { success: true };
     } catch (e) {
@@ -2880,24 +3544,29 @@ function registerIPC() {
     }
   });
 
-  ipcMain.on('comment:reached', (_e, { username, text }) => {
+  ipcMain.on('comment:reached', (_e, data) => {
+    console.log('[comment:reached] supported =', Notification.isSupported(), '| data =', JSON.stringify(data));
     if (!Notification.isSupported()) return;
-    new Notification({ title: 'Grimoire', body: `${username || 'Unknown'}: ${text || ''}` }).show();
+    const { username, text, chapterIndex, audioTimestampSeconds } = data || {};
+    const n = new Notification({
+      title: 'Grimoire',
+      body: `${username || 'Unknown'}: ${text || ''}`,
+      silent: true,
+    });
+    n.on('click', () => {
+      mainWindow?.focus();
+      mainWindow?.webContents.send('comment:seekTo', {
+        chapterIndex:          chapterIndex ?? 0,
+        audioTimestampSeconds: audioTimestampSeconds ?? 0,
+      });
+    });
+    n.show();
   });
 
-  // catalogSignedUrl is defined at module top level (needed by resolveCoverPath)
-
-  async function catalogCoverUrl(coverS3Key, cfg) {
-    if (!coverS3Key) return null;
-    const bucket = cfg?.bucket || 'grimoire-library';
-    dbg('catalogCoverUrl: key =', coverS3Key, '| bucket =', bucket);
-    try {
-      const url = await catalogSignedUrl(bucket, coverS3Key, 7200);
-      return url;
-    } catch (e) {
-      dbg('catalogCoverUrl: ERROR -', e.message);
-      return null;
-    }
+  // Cover art is always served publicly — no signing required.
+  function catalogCoverUrl(bookId) {
+    if (!bookId) return null;
+    return `https://grimoire-library.s3.us-east-1.amazonaws.com/catalog/${bookId}/cover.jpg`;
   }
 
   async function catalogObjectUrl(s3Key, cfg, expiresIn = 7200) {
@@ -2927,8 +3596,10 @@ function registerIPC() {
     return book;
   }
 
-  async function localizeCatalogBook(catBook) {
+  async function localizeCatalogBook(catBook, opts = {}) {
+    const { onProgress, cancelRef } = opts;
     const cfg = loadS3Config();
+    const structure = catalogStructureFromRow(catBook);
     dbg('localizeCatalogBook: id =', catBook?.id, '| s3_prefix =', catBook?.s3_prefix,
       '| cover_s3_key =', catBook?.cover_s3_key, '| chapters =', catBook?.chapters?.length,
       '| cfg.accessKeyId =', cfg?.accessKeyId, '| cfg.bucket =', cfg?.bucket);
@@ -2942,19 +3613,41 @@ function registerIPC() {
     ensureDir(managedLibraryRootDir());
     ensureDir(targetDir);
 
+    const total = sourceChapters.length;
+    const chapterWeight = total > 0 ? (95 / total) : 95;
     const localChapters = [];
-    for (let i = 0; i < sourceChapters.length; i++) {
+    for (let i = 0; i < total; i++) {
+      if (cancelRef?.cancelled) throw new Error('Download cancelled');
       const sourceChapter = sourceChapters[i] || {};
       const sourceFilename = String(sourceChapter.filename || '').trim();
       const filename = path.basename(sourceFilename || `Chapter ${i + 1}.mp3`);
       const filepath = path.join(targetDir, filename);
+      const basePercent = i * chapterWeight;
+      onProgress?.({ type: 'chapter', chapterIndex: i, chapterCount: total, filename, percent: Math.round(basePercent) });
       if (!fs.existsSync(filepath)) {
         if (!sourceFilename) throw new Error(`Catalog chapter ${i + 1} is missing a filename`);
         const s3Key = `${catBook.s3_prefix}${sourceFilename}`;
         dbg('localizeCatalogBook: downloading chapter', i + 1, '| s3Key =', s3Key);
         const url = await catalogObjectUrl(s3Key, cfg);
-        await downloadToFile(url, filepath);
+        const expectedBytes = await probeContentLength(url);
+        await downloadToFile(url, filepath, {
+          onProgress: ({ loaded, total: byteTotal }) => {
+            const effectiveTotal = byteTotal || expectedBytes || 0;
+            const withinChapter = effectiveTotal > 0 ? Math.min(1, loaded / effectiveTotal) : 0;
+            const percent = Math.min(95, Math.round(basePercent + (withinChapter * chapterWeight)));
+            onProgress?.({
+              type: 'chapter',
+              chapterIndex: i,
+              chapterCount: total,
+              filename,
+              loaded,
+              totalBytes: effectiveTotal,
+              percent,
+            });
+          },
+        });
       }
+      onProgress?.({ type: 'chapter', chapterIndex: i, chapterCount: total, filename, percent: Math.min(95, Math.round(basePercent + chapterWeight)) });
       localChapters.push({
         id: i,
         filename,
@@ -2964,15 +3657,15 @@ function registerIPC() {
       });
     }
 
+    onProgress?.({ type: 'cover', chapterIndex: total, chapterCount: total, filename: 'cover image', percent: 97 });
     let coverPath = existing?.coverPath && fs.existsSync(existing.coverPath) ? existing.coverPath : null;
     const keepExistingCover = coverPath && !isPathInside(targetDir, coverPath);
-    if (!keepExistingCover && catBook.cover_s3_key) {
-      const ext = path.extname(catBook.cover_s3_key).toLowerCase() || '.jpg';
-      const managedCoverPath = path.join(targetDir, `cover${ext}`);
+    if (!keepExistingCover) {
+      const managedCoverPath = path.join(targetDir, 'cover.jpg');
       if (!fs.existsSync(managedCoverPath)) {
-        dbg('localizeCatalogBook: downloading cover | s3Key =', catBook.cover_s3_key);
-        const coverUrl = await catalogObjectUrl(catBook.cover_s3_key, cfg);
-        try { await downloadToFile(coverUrl, managedCoverPath); }
+        dbg('localizeCatalogBook: downloading cover | bookId =', catBook.id);
+        const publicUrl = `https://grimoire-library.s3.us-east-1.amazonaws.com/catalog/${catBook.id}/cover.jpg`;
+        try { await downloadToFile(publicUrl, managedCoverPath); }
         catch (e) { dbg('localizeCatalogBook: cover download failed -', e.message); console.warn('Catalog cover download skipped:', e.message); }
       }
       if (fs.existsSync(managedCoverPath)) coverPath = managedCoverPath;
@@ -2994,6 +3687,8 @@ function registerIPC() {
       catalogId: catBook.id,
       sourceCatalogId: catBook.id,
       s3Prefix: catBook.s3_prefix || existing?.s3Prefix || null,
+      structureHash: structure.structureHash,
+      catalogUpdatedAt: structure.updatedAt,
       uploadedBy: catBook.uploaded_by || existing?.uploadedBy || null,
       hasEpub: !!(existing?.epubPath || existing?.hasEpub || catBook.has_epub),
       epubKey: catBook.epub_key || existing?.epubKey || null,
@@ -3004,6 +3699,89 @@ function registerIPC() {
     db.books[catBook.id] = localizedBook;
     saveDb();
     return localizedBook;
+  }
+
+  // ── New per-device download system ────────────────────────────────────────
+  // Downloads catalog book files to userData/Downloads/{bookId}/ and tracks
+  // state in device-downloads.json (never synced to Supabase).
+
+  async function downloadCatalogFiles(catBook, opts = {}) {
+    const { onProgress, cancelRef } = opts;
+    const cfg = loadS3Config();
+    const structure = catalogStructureFromRow(catBook);
+    const bookId = String(catBook.id);
+    const targetDir = catalogDownloadDir(bookId);
+    ensureDir(path.join(app.getPath('userData'), 'Downloads'));
+    ensureDir(targetDir);
+
+    const sourceChapters = Array.isArray(catBook.chapters) ? catBook.chapters : [];
+    if (!sourceChapters.length) throw new Error('Catalog book has no chapters to download');
+
+    const total = sourceChapters.length;
+    const chapterWeight = total > 0 ? (90 / total) : 90;
+    const localChapters = [];
+    let totalSize = 0;
+
+    for (let i = 0; i < total; i++) {
+      if (cancelRef?.cancelled) throw new Error('Download cancelled');
+      const sourceChapter = sourceChapters[i] || {};
+      const sourceFilename = String(sourceChapter.filename || '').trim();
+      const filename = path.basename(sourceFilename || `Chapter ${i + 1}.mp3`);
+      const filepath = path.join(targetDir, filename);
+      const basePercent = Math.round(i * chapterWeight);
+
+      onProgress?.({ type: 'chapter', chapterIndex: i, chapterCount: total, filename, loaded: 0, totalBytes: 0, percent: basePercent });
+
+      if (!fs.existsSync(filepath)) {
+        if (!sourceFilename) throw new Error(`Catalog chapter ${i + 1} is missing a filename`);
+        const s3Key = `${catBook.s3_prefix}${sourceFilename}`;
+        dbg('downloadCatalogFiles: chapter', i + 1, '| s3Key =', s3Key);
+        const url = await catalogObjectUrl(s3Key, cfg);
+        const expectedBytes = await probeContentLength(url);
+        await downloadToFile(url, filepath, {
+          onProgress: ({ loaded, total: byteTotal }) => {
+            const effectiveTotal = byteTotal || expectedBytes || 0;
+            const within = effectiveTotal > 0 ? Math.min(1, loaded / effectiveTotal) : 0;
+            const percent = Math.min(90, Math.round(basePercent + within * chapterWeight));
+            onProgress?.({ type: 'chapter', chapterIndex: i, chapterCount: total, filename, loaded, totalBytes: effectiveTotal, percent });
+          },
+        });
+      }
+
+      try { totalSize += fs.statSync(filepath).size; } catch {}
+      onProgress?.({ type: 'chapter', chapterIndex: i, chapterCount: total, filename, percent: Math.min(90, Math.round(basePercent + chapterWeight)) });
+      localChapters.push({ id: i, filename, filepath, title: sourceChapter.title || chapterTitle(filename), duration: sourceChapter.duration || 0 });
+    }
+
+    // Cover — always cover.jpg, served publicly from S3
+    onProgress?.({ type: 'cover', chapterIndex: total, chapterCount: total, filename: 'cover image', percent: 95 });
+    let coverPath = null;
+    {
+      const covDest = path.join(targetDir, 'cover.jpg');
+      if (!fs.existsSync(covDest)) {
+        try {
+          const publicUrl = `https://grimoire-library.s3.us-east-1.amazonaws.com/catalog/${bookId}/cover.jpg`;
+          await downloadToFile(publicUrl, covDest);
+        } catch (e) { dbg('downloadCatalogFiles: cover download failed -', e.message); }
+      }
+      if (fs.existsSync(covDest)) coverPath = covDest;
+    }
+
+    setDeviceDownload(bookId, {
+      book_id: bookId,
+      local_path: targetDir,
+      downloaded_at: new Date().toISOString(),
+      file_count: localChapters.length,
+      total_size: totalSize,
+      cover_path: coverPath,
+      s3_prefix: structure.s3Prefix,
+      structure_hash: structure.structureHash,
+      chapter_count: structure.chapterCount,
+      chapter_filenames: structure.filenames,
+    });
+
+    dbg('downloadCatalogFiles: done | bookId =', bookId, '| files =', localChapters.length, '| totalSize =', totalSize);
+    return { localPath: targetDir, fileCount: localChapters.length, totalSize, coverPath, chapters: localChapters };
   }
 
   ipcMain.handle('catalog:getAll', async () => {
@@ -3017,13 +3795,21 @@ function registerIPC() {
         .order('title',        { ascending: true });
       if (error) { dbg('catalog:getAll: supabase error =', error.message); return { error: error.message }; }
       dbg('catalog:getAll: fetched', books?.length ?? 0, 'books');
-      const cfg = loadS3Config();
       const result = await Promise.all(books.map(async b => {
-        dbg('catalog:getAll: book id =', b.id, '| cover_s3_key =', b.cover_s3_key, '| s3_prefix =', b.s3_prefix);
-        // Download cover to local cache via Node (avoids browser-side URL issues).
-        // Return as coverPath so the renderer can use pathToUrl() on it.
-        const coverPath = await resolveCoverPath(b.id, b.cover_s3_key, cfg);
-        return { ...b, coverPath, coverUrl: null };
+        dbg('catalog:getAll: book id =', b.id, '| s3_prefix =', b.s3_prefix);
+        // Cover is always public — download to local cache for offline use.
+        const coverPath = await resolveCoverPath(b.id);
+        const dlRecord = getDeviceDownload(b.id);
+        const downloadedLocally = !!(dlRecord?.local_path && fs.existsSync(dlRecord.local_path) && catalogDownloadRecordIsCurrent(dlRecord, b));
+        const structure = catalogStructureFromRow(b);
+        return {
+          ...b,
+          updated_at: b.updated_at || structure.updatedAt,
+          structure_hash: b.structure_hash || structure.structureHash,
+          coverPath,
+          coverUrl: null,
+          downloadedLocally,
+        };
       }));
       return { books: result };
     } catch (e) { dbg('catalog:getAll: exception -', e.message); return { error: e.message }; }
@@ -3043,46 +3829,74 @@ function registerIPC() {
         .from('catalog').select('*').in('id', bookIds);
       if (bErr) return { error: bErr.message };
 
-      const cfg = loadS3Config();
       const result = await Promise.all(entries.map(async entry => {
         const cat = catBooks.find(b => b.id === entry.book_id);
         if (!cat) return null;
-        const coverUrl = await catalogCoverUrl(cat.cover_s3_key, cfg);
-        const chapters = (cat.chapters || []).map((ch, i) => ({
-          id: i, filename: ch.filename,
-          title: ch.title || `Chapter ${i + 1}`,
-          duration: ch.duration || 0,
-        }));
+        const structure = catalogStructureFromRow(cat);
+
+        // Check device-local download state
+        const dlRecord = getDeviceDownload(entry.book_id);
+        const downloadedLocally = !!(dlRecord?.local_path && fs.existsSync(dlRecord.local_path) && catalogDownloadRecordIsCurrent(dlRecord, cat));
+        const localPath = downloadedLocally ? dlRecord.local_path : null;
+
+        const chapters = (cat.chapters || []).map((ch, i) => {
+          const base = {
+            id: i, filename: ch.filename,
+            title: ch.title || `Chapter ${i + 1}`,
+            duration: ch.duration || 0,
+          };
+          if (downloadedLocally && localPath) {
+            base.filepath = path.join(localPath, ch.filename);
+          }
+          return base;
+        });
+
+        // Cover: prefer local download copy, fall back to public S3 URL
+        let coverUrl = null;
+        let coverPath = null;
+        if (downloadedLocally && dlRecord.cover_path && fs.existsSync(dlRecord.cover_path)) {
+          coverPath = dlRecord.cover_path;
+        } else {
+          coverUrl = catalogCoverUrl(cat.id);
+        }
+
         return {
-          id:           cat.id,
-          title:        cat.title,
-          author:       cat.author || '',
-          series:       cat.series || null,
-          seriesOrder:  cat.series_order || null,
-          s3Prefix:     cat.s3_prefix,
+          id:              cat.id,
+          title:           cat.title,
+          author:          cat.author || '',
+          series:          cat.series || null,
+          seriesOrder:     cat.series_order || null,
+          s3Prefix:        cat.s3_prefix,
           chapters,
-          chapterCount: cat.chapter_count || chapters.length,
-          coverUrl,     coverPath: null, folderPath: null,
-          isCloudOnly:  true, isCatalog: true,
-          hasEpub:      cat.has_epub  || false,
-          epubKey:      cat.epub_key  || null,
-          uploadedBy:   cat.uploaded_by || null,
-          addedAt:      entry.added_at,
-          playback:     db.playback[cat.id] || null,
+          chapterCount:    cat.chapter_count || chapters.length,
+          coverUrl,        coverPath,
+          isCloudOnly:     !downloadedLocally,
+          isCatalog:       true,
+          hasEpub:         cat.has_epub  || false,
+          epubKey:         cat.epub_key  || null,
+          uploadedBy:      cat.uploaded_by || null,
+          addedAt:         entry.added_at,
+          structureHash:   structure.structureHash,
+          catalogUpdatedAt: structure.updatedAt,
+          playback:        db.playback[cat.id] || null,
+          downloadedLocally,
+          localPath,
         };
       }));
       return { books: result.filter(Boolean) };
     } catch (e) { return { error: e.message }; }
   });
 
-  ipcMain.handle('catalog:addToLibrary', async (_e, { bookId }) => {
+  ipcMain.handle('catalog:addToLibrary', async (event, { bookId }) => {
     dbg('catalog:addToLibrary: bookId =', bookId, '| currentUser =', currentUser?.id || 'none', '| packaged =', app.isPackaged);
     if (!supabase || !currentUser) return { error: 'Not logged in' };
     let insertedLibraryRow = false;
-    const hadManagedLocalBook = !!db.books[bookId];
+    const cancelRef = { cancelled: false };
+    _downloadCancelRefs.set(bookId, cancelRef);
     try {
       const catBook = await fetchCatalogBookById(bookId);
-      dbg('catalog:addToLibrary: catBook id =', catBook?.id, '| s3_prefix =', catBook?.s3_prefix, '| cover_s3_key =', catBook?.cover_s3_key, '| chapters =', catBook?.chapters?.length);
+      dbg('catalog:addToLibrary: catBook id =', catBook?.id, '| s3_prefix =', catBook?.s3_prefix, '| chapters =', catBook?.chapters?.length);
+
       const { data: existing } = await supabase
         .from('user_library').select('id')
         .eq('user_id', currentUser.id).eq('book_id', bookId).maybeSingle();
@@ -3095,23 +3909,116 @@ function registerIPC() {
         insertedLibraryRow = true;
       }
 
-      const localizedBook = await localizeCatalogBook(catBook);
+      const result = await downloadCatalogFiles(catBook, {
+        cancelRef,
+        onProgress: (prog) => {
+          try { event.sender.send('catalog:downloadProgress', { bookId, ...prog }); } catch {}
+        },
+      });
+
+      event.sender.send('catalog:downloadProgress', { bookId, type: 'done', percent: 100 });
       return {
         success: true,
         alreadyAdded: !!existing,
         downloaded: true,
-        book: { ...localizedBook, playback: db.playback[bookId] || null },
+        localPath: result.localPath,
+        chapters: result.chapters,
+        coverPath: result.coverPath,
       };
     } catch (e) {
-      if (insertedLibraryRow) {
-        try {
-          await supabase.from('user_library')
-            .delete().eq('user_id', currentUser.id).eq('book_id', bookId);
-        } catch {}
+      if (cancelRef.cancelled) {
+        if (insertedLibraryRow) {
+          try { await supabase.from('user_library').delete().eq('user_id', currentUser.id).eq('book_id', bookId); } catch {}
+        }
+        // Clean up partial download
+        const dir = catalogDownloadDir(bookId);
+        if (fs.existsSync(dir)) try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+        clearDeviceDownload(bookId);
+        return { cancelled: true };
       }
-      if (!hadManagedLocalBook) cleanupManagedCatalogBookFiles(bookId);
+      if (insertedLibraryRow) {
+        try { await supabase.from('user_library').delete().eq('user_id', currentUser.id).eq('book_id', bookId); } catch {}
+      }
+      return { error: e.message };
+    } finally {
+      _downloadCancelRefs.delete(bookId);
+    }
+  });
+
+  ipcMain.handle('catalog:cancelDownload', (_e, { bookId }) => {
+    const ref = _downloadCancelRefs.get(bookId);
+    if (ref) ref.cancelled = true;
+    return { ok: true };
+  });
+
+  // Download files for a book already in user_library
+  ipcMain.handle('catalog:download', async (event, { bookId }) => {
+    if (!supabase || !currentUser) return { error: 'Not logged in' };
+    const cancelRef = { cancelled: false };
+    _downloadCancelRefs.set(bookId, cancelRef);
+    try {
+      const catBook = await fetchCatalogBookById(bookId);
+      const result = await downloadCatalogFiles(catBook, {
+        cancelRef,
+        onProgress: (prog) => {
+          try { event.sender.send('catalog:downloadProgress', { bookId, ...prog }); } catch {}
+        },
+      });
+      event.sender.send('catalog:downloadProgress', { bookId, type: 'done', percent: 100 });
+      return { success: true, localPath: result.localPath, chapters: result.chapters, coverPath: result.coverPath };
+    } catch (e) {
+      if (cancelRef.cancelled) return { cancelled: true };
+      return { error: e.message };
+    } finally {
+      _downloadCancelRefs.delete(bookId);
+    }
+  });
+
+  // Delete local files for a downloaded catalog book (keeps Supabase user_library entry)
+  ipcMain.handle('catalog:removeLocalFiles', (_e, { bookId }) => {
+    try {
+      const dir = catalogDownloadDir(bookId);
+      if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+      clearDeviceDownload(bookId);
+      return { success: true };
+    } catch (e) {
       return { error: e.message };
     }
+  });
+
+  // Re-download: clear existing files then download fresh
+  ipcMain.handle('catalog:redownload', async (event, { bookId }) => {
+    // Clear existing local files first
+    try {
+      const dir = catalogDownloadDir(bookId);
+      if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+    } catch {}
+    clearDeviceDownload(bookId);
+
+    if (!supabase || !currentUser) return { error: 'Not logged in' };
+    const cancelRef = { cancelled: false };
+    _downloadCancelRefs.set(bookId, cancelRef);
+    try {
+      const catBook = await fetchCatalogBookById(bookId);
+      const result = await downloadCatalogFiles(catBook, {
+        cancelRef,
+        onProgress: (prog) => {
+          try { event.sender.send('catalog:downloadProgress', { bookId, ...prog }); } catch {}
+        },
+      });
+      event.sender.send('catalog:downloadProgress', { bookId, type: 'done', percent: 100 });
+      return { success: true, localPath: result.localPath, chapters: result.chapters, coverPath: result.coverPath };
+    } catch (e) {
+      if (cancelRef.cancelled) return { cancelled: true };
+      return { error: e.message };
+    } finally {
+      _downloadCancelRefs.delete(bookId);
+    }
+  });
+
+  // Return the device-local download record for a book
+  ipcMain.handle('catalog:getDownloadState', (_e, { bookId }) => {
+    return getDeviceDownload(bookId);
   });
 
   ipcMain.handle('catalog:removeFromLibrary', async (_e, { bookId }) => {
@@ -3120,6 +4027,7 @@ function registerIPC() {
       const { error } = await supabase.from('user_library')
         .delete().eq('user_id', currentUser.id).eq('book_id', bookId);
       if (error) return { error: error.message };
+      // Clean up old-system managed book if present
       if (db.books[bookId] && isManagedCatalogBook(db.books[bookId], bookId)) {
         deleteBookRecord(bookId, { cleanupManaged: true });
       } else {
@@ -3127,6 +4035,10 @@ function registerIPC() {
         delete db.bookmarks[bookId];
         saveDb();
       }
+      // Clean up new-system device download if present
+      const dir = catalogDownloadDir(bookId);
+      if (fs.existsSync(dir)) try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+      clearDeviceDownload(bookId);
       return { success: true };
     } catch (e) { return { error: e.message }; }
   });
@@ -3203,32 +4115,48 @@ function registerIPC() {
       } catch (e) { return { error: `Failed to upload ${filename}: ${e.message}` }; }
     }
 
-    // Upload cover art
+    // Upload cover art — always convert to JPEG 500×500 max and upload as cover.jpg
     let coverS3Key = null;
     if (coverPath && fs.existsSync(coverPath)) {
-      const ext = path.extname(coverPath).slice(1).toLowerCase() || 'jpg';
-      coverS3Key = `${s3Prefix}cover.${ext}`;
-      event.sender.send('catalog:uploadProgress', { type: 'status', message: 'Uploading cover…', progress: 92 });
+      coverS3Key = `${s3Prefix}cover.jpg`;
+      event.sender.send('catalog:uploadProgress', { type: 'status', message: 'Processing cover…', progress: 90 });
       try {
+        const sharp = require('sharp');
+        const coverBuffer = await sharp(coverPath)
+          .resize(500, 500, { fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 85 })
+          .toBuffer();
+        event.sender.send('catalog:uploadProgress', { type: 'status', message: 'Uploading cover…', progress: 92 });
         await s3.send(new PutObjectCommand({
           Bucket: cfg.bucket, Key: coverS3Key,
-          Body: fs.readFileSync(coverPath),
-          ContentType: ext === 'png' ? 'image/png' : 'image/jpeg',
+          Body: coverBuffer,
+          ContentType: 'image/jpeg',
         }));
       } catch (e) { console.error('Cover upload failed:', e.message); coverS3Key = null; }
     }
 
     // Insert catalog row
     event.sender.send('catalog:uploadProgress', { type: 'status', message: 'Saving to marketplace…', progress: 97 });
-    const chapters = files.map((filename, i) => ({ filename, title: chapterTitle(filename), duration: 0 }));
+    const structure = catalogStructurePayload({
+      s3Prefix,
+      chapterCount: files.length,
+      chapters: files.map((filename, i) => ({ filename, title: chapterTitle(filename), duration: 0 })),
+    });
     const { error: insertErr } = await supabase.from('catalog').insert({
       id: bookId, s3_prefix: s3Prefix,
       title, author, series, series_order: seriesOrder,
-      chapter_count: files.length, chapters,
+      chapter_count: structure.chapterCount, chapters: structure.chapters,
+      updated_at: structure.updatedAt,
+      structure_hash: structure.structureHash,
       cover_s3_key: coverS3Key,
       uploaded_by: currentUser?.id || null,
     });
-    if (insertErr) return { error: 'Failed to save book: ' + insertErr.message };
+    if (insertErr) {
+      if (isUnknownColumnError(insertErr)) {
+        return { error: 'Catalog schema is missing updated_at or structure_hash. Run the catalog structure migration first.' };
+      }
+      return { error: 'Failed to save book: ' + insertErr.message };
+    }
 
     event.sender.send('catalog:uploadProgress', { type: 'done', message: 'Upload complete!', progress: 100 });
     return { success: true, bookId, chapterCount: files.length };
@@ -3356,8 +4284,6 @@ function registerIPC() {
     const cacheKey = JSON.stringify({
       bookId,
       bookTitle: bookTitle || '',
-      chapterCount: chapterCount || 0,
-      titles: (audioChapters || []).map(ch => ch?.title || ''),
     });
     if (epubMemoryCache.has(cacheKey)) {
       return epubMemoryCache.get(cacheKey);
@@ -3365,21 +4291,12 @@ function registerIPC() {
     if (fs.existsSync(cacheFile)) {
       try {
         const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-        const chapters = Array.isArray(cached?.chapters) ? cached.chapters : cached;
         const meta = cached?.meta || null;
-        const wantedTitles = (audioChapters || []).map(ch => ch?.title || '');
-        const metaMatches = !meta ||
-          ((meta.chapterCount || 0) === (chapterCount || 0) &&
-           (meta.bookTitle || '') === (bookTitle || '') &&
-           JSON.stringify(meta.audioTitles || []) === JSON.stringify(wantedTitles));
-        if (metaMatches && Array.isArray(chapters) && chapters.length) {
-          const normalized = cached?.sections ? cached : {
-            sections: chapters,
-            storyStartIndex: 0,
-            frontMatterCount: 0,
-            backMatterCount: 0,
-            storyCount: chapters.length,
-          };
+        const sections = Array.isArray(cached?.sections)
+          ? cached.sections
+          : (Array.isArray(cached?.chapters) ? cached.chapters : (Array.isArray(cached) ? cached : []));
+        if (sections.length && (!meta || meta.mode === 'plain-reader')) {
+          const normalized = { sections };
           epubMemoryCache.set(cacheKey, normalized);
           return normalized;
         }
@@ -3410,13 +4327,20 @@ function registerIPC() {
     if (!epubPath) return { error: 'No EPUB file found. Attach one first via right-click.' };
     try {
       const parsed = await parseEpubFile(epubPath);
-      const normalized = normalizeEpubChapters(parsed, chapterCount, audioChapters, bookTitle || db.books[bookId]?.title || '');
+      const sections = (parsed || [])
+        .filter(section => Array.isArray(section?.paragraphs) && section.paragraphs.length)
+        .map((section, index) => ({
+          title: section.title || `Section ${index + 1}`,
+          paragraphs: section.paragraphs,
+          kind: 'section',
+          syncIndex: index,
+        }));
+      const normalized = { sections };
       if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
       fs.writeFileSync(cacheFile, JSON.stringify({
         meta: {
+          mode: 'plain-reader',
           bookTitle: bookTitle || '',
-          chapterCount: chapterCount || 0,
-          audioTitles: (audioChapters || []).map(ch => ch?.title || ''),
         },
         ...normalized,
         chapters: normalized.sections,
@@ -3438,15 +4362,14 @@ function registerIPC() {
     return {};
   });
 
-  ipcMain.handle('epub:saveReadingPos', (_e, { bookId, chapterIndex, scrollTop }) => {
+  ipcMain.handle('epub:saveReadingPos', (_e, { bookId, position }) => {
     try {
       const f = path.join(app.getPath('userData'), 'epub-reading-pos.json');
       let d = {};
       try { d = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
       const key = currentUser?.id || 'local';
       if (!d[key]) d[key] = {};
-      if (!d[key][bookId]) d[key][bookId] = {};
-      d[key][bookId][String(chapterIndex)] = scrollTop;
+      d[key][bookId] = position || {};
       fs.writeFileSync(f, JSON.stringify(d), 'utf8');
     } catch {}
     return { success: true };

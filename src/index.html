@@ -69,8 +69,20 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
           <span id="sidebar-email" class="sidebar-account-email">Not signed in</span>
         </button>
+        <p id="app-version-label" class="app-version-label">Grimoire</p>
       </div>
     </aside>
+
+    <!-- Update notification bar (shown when a newer version is available) -->
+    <div id="update-bar" class="update-bar hidden">
+      <span id="update-bar-msg">A new version is available</span>
+      <div class="update-bar-actions">
+        <button id="update-download-btn" class="update-bar-btn">Download update</button>
+        <button id="update-restart-btn" class="update-bar-btn update-bar-btn-primary hidden">Restart to update</button>
+        <span id="update-bar-progress" class="update-bar-progress hidden"></span>
+      </div>
+      <button id="update-dismiss-btn" class="update-bar-dismiss" title="Dismiss">✕</button>
+    </div>
 
     <!-- Main content -->
     <main id="main">
@@ -78,11 +90,22 @@
       <!-- Library View -->
       <div id="library-view" class="view active">
         <div class="view-header">
-          <h1 class="view-title serif">My Library</h1>
+          <div class="library-title-wrap">
+            <button class="btn-ghost hidden" id="collection-back-btn" type="button">Back</button>
+            <h1 class="view-title serif" id="library-title">My Library</h1>
+          </div>
           <div class="view-header-actions">
             <div class="search-wrap">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
               <input type="text" id="search-input" placeholder="Search library…" autocomplete="off" spellcheck="false">
+            </div>
+            <button class="btn-ghost" id="new-collection-btn" title="Create collection" type="button">New Collection</button>
+            <div id="collection-actions" class="collection-actions hidden">
+              <button class="btn-ghost" id="manage-collection-books-btn" type="button">Manage Books</button>
+              <button class="btn-ghost" id="change-collection-cover-btn" type="button">Change Cover</button>
+              <button class="btn-ghost" id="remove-collection-cover-btn" type="button">Remove Cover</button>
+              <button class="btn-ghost" id="rename-collection-btn" type="button">Rename</button>
+              <button class="btn-ghost danger" id="delete-collection-btn" type="button">Delete</button>
             </div>
             <button class="btn-ghost" id="import-btn" title="Import local folder">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
@@ -91,6 +114,7 @@
           </div>
         </div>
 
+        <div id="collection-grid" class="collection-grid"></div>
         <div id="book-grid"></div>
 
         <div id="empty-library" class="empty-state hidden">
@@ -100,6 +124,21 @@
           <h2 class="serif">Your library is empty</h2>
           <p>Browse the Marketplace to add audiobooks, or import a local folder.</p>
           <button class="btn-primary" id="import-btn-empty">Import local folder</button>
+        </div>
+
+        <div id="collection-manage-modal" class="modal-backdrop hidden">
+          <div class="modal glass collection-manage-modal">
+            <div class="modal-header">
+              <h3 class="serif">Manage Collection</h3>
+              <button class="icon-btn" id="collection-manage-close" type="button">✕</button>
+            </div>
+            <p class="collection-manage-copy">Add or remove library books, then adjust their order.</p>
+            <div id="collection-manage-list" class="collection-manage-list"></div>
+            <div class="collection-manage-actions">
+              <button class="btn-ghost" id="collection-manage-cancel" type="button">Close</button>
+              <button class="btn-primary" id="collection-manage-save" type="button">Save Changes</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -208,10 +247,22 @@
             <button class="icon-btn" id="epub-settings-btn" title="Reader settings">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             </button>
+            <button class="icon-btn" id="epub-search-btn" title="Find in book (Ctrl+F)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            </button>
             <button class="icon-btn" id="epub-close-btn" title="Close reader">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
           </div>
+        </div>
+        <div class="epub-search hidden" id="epub-search">
+          <input id="epub-search-input" type="text" placeholder="Find in book" autocomplete="off" spellcheck="false">
+          <span class="epub-search-count" id="epub-search-count">0 matches</span>
+          <button class="btn-ghost" id="epub-search-prev">Previous</button>
+          <button class="btn-ghost" id="epub-search-next">Next</button>
+          <button class="icon-btn" id="epub-search-close" title="Close find">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
         </div>
         <!-- Reading progress bar -->
         <div class="epub-progress-track"><div class="epub-progress-fill" id="epub-progress-fill"></div></div>
@@ -438,7 +489,29 @@
   </div>
 
   <div id="comment-drop-popup" class="comment-drop-popup hidden">
-    <input type="text" id="comment-drop-input" class="comment-drop-input" placeholder="Drop a comment…">
+    <div class="comment-drop-header">
+      <span class="comment-drop-title">Timed comment</span>
+      <span id="comment-drop-meta" class="comment-drop-meta"></span>
+    </div>
+    <textarea id="comment-drop-input" class="comment-drop-input" placeholder="Drop a comment…" rows="3"></textarea>
+    <div class="comment-drop-actions">
+      <button class="btn-ghost" id="comment-drop-cancel" type="button">Cancel</button>
+      <button class="btn" id="comment-drop-save" type="button">Save comment</button>
+    </div>
+  </div>
+  <div id="comment-detail-popup" class="comment-detail-popup hidden">
+    <div class="comment-detail-header">
+      <div>
+        <div id="comment-detail-user" class="comment-detail-user"></div>
+        <div id="comment-detail-meta" class="comment-detail-meta"></div>
+      </div>
+      <button class="icon-btn comment-detail-close" id="comment-detail-close" title="Close comment" type="button">×</button>
+    </div>
+    <div id="comment-detail-text" class="comment-detail-text"></div>
+    <div class="comment-detail-actions">
+      <button class="btn-ghost" id="comment-detail-seek" type="button">Jump to comment</button>
+      <button class="btn-ghost hidden" id="comment-detail-delete" type="button">Delete</button>
+    </div>
   </div>
   <div id="epub-selection-popup" class="epub-selection-popup hidden">
     <button class="btn-ghost" id="epub-selection-comment-btn">Comment at current audio time</button>
@@ -510,13 +583,15 @@
     <button class="ctx-item" id="ctx-rate">☆ Rate…</button>
     <button class="ctx-item hidden" id="ctx-set-cover">⬡ Set Cover Art…</button>
     <button class="ctx-item hidden" id="ctx-set-bg">▣ Set Background…</button>
-    <button class="ctx-item hidden" id="ctx-split">✂ Split into Chapters…</button>
     <button class="ctx-item hidden" id="ctx-transcribe">◎ Transcribe…</button>
     <button class="ctx-item hidden" id="ctx-view-transcript">≡ View Transcript</button>
     <button class="ctx-item hidden" id="ctx-retranscribe">↻ Re-transcribe…</button>
     <button class="ctx-item hidden" id="ctx-smart-sync">⚡ Generate Smart Sync</button>
     <button class="ctx-item hidden" id="ctx-reimport">↺ Re-import</button>
+    <button class="ctx-item hidden" id="ctx-split">✂ Split into Chapters…</button>
     <button class="ctx-item hidden" id="ctx-attach-epub">📖 Attach EPUB…</button>
+    <button class="ctx-item hidden" id="ctx-redownload">↻ Re-download</button>
+    <button class="ctx-item danger hidden" id="ctx-remove-local">✕ Remove local files</button>
     <div class="ctx-divider"></div>
     <button class="ctx-item danger" id="ctx-delete">✕ Remove from library</button>
   </div>
@@ -524,10 +599,49 @@
   <!-- ── Marketplace Context Menu ── -->
   <div id="cat-ctx-menu" class="ctx-menu hidden">
     <button class="ctx-item" id="cat-ctx-add">+ Add to Library</button>
+    <button class="ctx-item hidden" id="cat-ctx-redownload">↻ Re-download</button>
+    <button class="ctx-item danger hidden" id="cat-ctx-remove-local">✕ Remove local files</button>
     <button class="ctx-item hidden" id="cat-ctx-edit">✎ Edit Book…</button>
     <button class="ctx-item hidden" id="cat-ctx-attach-epub">📖 Attach EPUB…</button>
     <div class="ctx-divider cat-ctx-owner-only hidden"></div>
     <button class="ctx-item danger hidden" id="cat-ctx-delete">✕ Remove from Marketplace</button>
+  </div>
+
+  <!-- ── Catalog Download Progress Modal ── -->
+  <div id="dl-modal" class="modal-backdrop hidden">
+    <div class="dl-modal-box glass">
+      <div class="dl-modal-header">
+        <div class="dl-modal-cover" id="dl-modal-cover"></div>
+        <div class="dl-modal-info">
+          <p class="dl-modal-title" id="dl-modal-title">Downloading…</p>
+          <p class="dl-modal-sub" id="dl-modal-status">Preparing…</p>
+        </div>
+        <div class="dl-modal-controls">
+          <button class="dl-ctrl-btn" id="dl-minimize-btn" title="Minimize">—</button>
+          <button class="dl-ctrl-btn" id="dl-cancel-btn" title="Cancel">✕</button>
+        </div>
+      </div>
+      <div class="dl-modal-body" id="dl-modal-body">
+        <div class="dl-file-row">
+          <span class="dl-file-label" id="dl-file-name">…</span>
+          <span class="dl-file-bytes" id="dl-file-bytes"></span>
+        </div>
+        <div class="dl-progress-track">
+          <div class="dl-progress-fill" id="dl-file-fill"></div>
+        </div>
+        <div class="dl-overall-row">
+          <span id="dl-overall-text">0 of 0 files · 0%</span>
+          <span id="dl-total-mb" class="dl-total-mb"></span>
+        </div>
+        <div class="dl-progress-track dl-overall-track">
+          <div class="dl-progress-fill" id="dl-overall-fill"></div>
+        </div>
+      </div>
+      <div id="dl-error-section" class="hidden dl-error-section">
+        <p id="dl-error-msg" class="dl-error-text"></p>
+        <button class="btn-primary" id="dl-retry-btn">Retry</button>
+      </div>
+    </div>
   </div>
 
   <!-- ── Generic Confirm Dialog ── -->
@@ -680,11 +794,11 @@
   <!-- ── Split Chapters Modal ── -->
   <div id="split-modal" class="modal-backdrop hidden">
     <div class="modal glass split-modal-inner">
-      <h3>Split into Chapters</h3>
+      <h3 id="split-title">Split into Chapters</h3>
 
       <!-- config state -->
       <div class="split-state" id="split-cfg">
-        <p class="split-info">Grimoire will scan the audio for silences and split it into separate chapter files. The original file is kept as a backup.</p>
+        <p class="split-info" id="split-info">Grimoire will scan the audio for silences and split it into separate chapter files. The original file is kept as a backup.</p>
 
         <div class="split-sens-wrap">
           <span class="split-sens-label">Detection method</span>

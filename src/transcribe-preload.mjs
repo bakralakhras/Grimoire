@@ -107,5 +107,5 @@ ipcRenderer.on('transcribe:start', async (_e, { bookId, chapters, ffmpegPath, tm
     ipcRenderer.send('transcribe:done', { bookId, error: null });
   } catch (err) {
     ipcRenderer.send('transcribe:done', { bookId, error: err.message });
-  }
+  }n
 });

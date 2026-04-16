@@ -1,0 +1,11 @@
+-- Migration: Standardize cover art to always use cover.jpg
+-- Run this in the Supabase SQL editor (https://app.supabase.com → your project → SQL Editor)
+--
+-- The catalog table has no cover_url column — the app constructs the URL
+-- deterministically from the book ID, so no data migration is required.
+--
+-- The cover_s3_key column is still written on upload (value: catalog/{id}/cover.jpg)
+-- but is no longer read for display. Safe to leave in place.
+-- To drop it entirely once you're sure nothing depends on it:
+--
+-- ALTER TABLE catalog DROP COLUMN IF EXISTS cover_s3_key;

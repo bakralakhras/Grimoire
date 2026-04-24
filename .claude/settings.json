@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:api.anthropic.com)",
+      "Bash(zcat webfetch-1776703918666-tkxcvr.bin)",
+      "Bash(python3 -c \"import gzip,sys; data=open\\('webfetch-1776703918666-tkxcvr.bin','rb'\\).read\\(\\); print\\(gzip.decompress\\(data\\).decode\\('utf-8',errors='replace'\\)[:5000]\\)\")",
+      "Bash(cd /tmp)",
+      "Bash(python3 -c ' *)",
+      "Read(//c/tmp/**)"
+    ]
+  }
+}

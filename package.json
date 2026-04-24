@@ -37,7 +37,7 @@
     "asar": false,
     "win": {
       "target": "nsis",
-      "icon": "assets/icon.ico",
+      "icon": "assets/grimoire-logo.png",
       "signAndEditExecutable": false
     },
     "nsis": {

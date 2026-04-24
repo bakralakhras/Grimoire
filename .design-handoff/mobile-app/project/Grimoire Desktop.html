@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Grimoire Desktop — Electron app</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #f0eee9; overflow: hidden; }
+  * { box-sizing: border-box; }
+  ::-webkit-scrollbar { display: none; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="system.jsx"></script>
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="desktop-shell.jsx"></script>
+<script type="text/babel" src="desktop-library.jsx"></script>
+<script type="text/babel" src="desktop-marketplace.jsx"></script>
+<script type="text/babel" src="desktop-player.jsx"></script>
+<script type="text/babel" src="desktop-reader.jsx"></script>
+<script type="text/babel">
+
+function DesktopFrame({ children, w = 1320, h = 820 }) {
+  return (
+    <div style={{
+      width: w, height: h, borderRadius: 14, overflow: 'hidden',
+      background: '#08070B',
+      boxShadow: '0 40px 100px rgba(0,0,0,0.3), 0 0 0 1px rgba(0,0,0,0.2)',
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function App() {
+  return (
+    <DesignCanvas>
+      <div style={{ padding: '0 60px 40px', maxWidth: 1200 }}>
+        <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 56, fontWeight: 500, color: '#1a1520', letterSpacing: -1, lineHeight: 1 }}>Grimoire — Desktop</div>
+        <div style={{ fontFamily: '"Cormorant Garamond", serif', fontStyle: 'italic', fontSize: 22, color: 'rgba(60,50,40,0.7)', marginTop: 8 }}>
+          Electron app · same obsidian palette, Cormorant + Inter, gold sigils. Recomposed for 1280+ widescreen.
+        </div>
+      </div>
+
+      <DCSection title="01 · Library" subtitle="Persistent sidebar · search · New Collection · Local import · download status">
+        <DCArtboard label="Library (Home)" width={1320} height={820}>
+          <DesktopFrame><DesktopLibrary/></DesktopFrame>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection title="02 · Marketplace" subtitle="Grouped by saga · IN LIBRARY badge · Upload Book CTA · right-click context menu">
+        <DCArtboard label="Marketplace" width={1320} height={820}>
+          <DesktopFrame><DesktopMarketplace/></DesktopFrame>
+        </DCArtboard>
+        <DCArtboard label="Right-click context menu" width={1320} height={820}>
+          <DesktopFrame><DesktopMarketplace showMenu/></DesktopFrame>
+        </DCArtboard>
+        <DCArtboard label="Upload Book modal" width={1320} height={820}>
+          <DesktopFrame><DesktopMarketplace showModal/></DesktopFrame>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection title="03 · Now Playing" subtitle="Chapters + Bookmarks panel · cover hero · scrubber · Open EPUB · persistent player bar">
+        <DCArtboard label="Now Playing" width={1320} height={820}>
+          <DesktopFrame><DesktopPlayer/></DesktopFrame>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection title="04 · EPUB Reader" subtitle="Overlay on top of Now Playing · layout toggles · TOC panel · serif reading column · player bar persists">
+        <DCArtboard label="EPUB Reader (overlay)" width={1320} height={820}>
+          <DesktopFrame><DesktopReader/></DesktopFrame>
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

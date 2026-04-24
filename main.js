@@ -597,6 +597,7 @@ async function loadSession() {
     currentUser = await hydrateAuthUser(data.session.user);
     dbg('loadSession: restored session | userId =', currentUser?.id, '| username =', currentUser?.username);
     saveSession(data.session);
+    fetchAndCacheS3Config().catch(() => {});
     return data.session;
   } catch (e) {
     dbg('loadSession: exception -', e.message);
@@ -1001,6 +1002,37 @@ function saveS3Config(cfg) {
   try { fs.writeFileSync(s3ConfigPath(), JSON.stringify(cfg, null, 2), 'utf8'); } catch {}
 }
 
+async function pushS3ConfigToSupabase(cfg) {
+  if (!supabase || !currentUser) return;
+  try {
+    await supabase.from('app_config').upsert(
+      { key: 'aws_s3_config', value: cfg, updated_at: new Date().toISOString() },
+      { onConflict: 'key' }
+    );
+    dbg('pushS3ConfigToSupabase: synced');
+  } catch (e) {
+    dbg('pushS3ConfigToSupabase: error -', e.message);
+  }
+}
+
+async function fetchAndCacheS3Config() {
+  if (!supabase) return;
+  const existing = loadS3Config();
+  if (existing?.accessKeyId) return; // already have local creds
+  try {
+    const { data, error } = await supabase
+      .from('app_config')
+      .select('value')
+      .eq('key', 'aws_s3_config')
+      .maybeSingle();
+    if (error || !data?.value) return;
+    saveS3Config(data.value);
+    dbg('fetchAndCacheS3Config: cached from Supabase');
+  } catch (e) {
+    dbg('fetchAndCacheS3Config: error -', e.message);
+  }
+}
+
 function createS3Client(cfg) {
   const { S3Client } = require('@aws-sdk/client-s3');
   return new S3Client({
@@ -1111,6 +1143,42 @@ function chapterTitle(filename) {
   name = name.replace(/^(chapter\s+)?\d+[\s\-_.]+/i, '');
   name = name.replace(/[_-]/g, ' ').replace(/\s+/g, ' ').trim();
   return name || filename.replace(ext, '');
+}
+
+async function buildEmbeddedChapters(filePath, existingChapters = []) {
+  const ext = path.extname(filePath || '').toLowerCase();
+  if (!['.mp4', '.m4a', '.m4b'].includes(ext)) return null;
+  try {
+    const mm = require('music-metadata');
+    const meta = await mm.parseFile(filePath, {
+      skipCovers: true,
+      duration: true,
+      includeChapters: true,
+    });
+    const embedded = Array.isArray(meta?.format?.chapters) ? meta.format.chapters : [];
+    const sampleRate = Number(meta?.format?.sampleRate) || 0;
+    if (embedded.length <= 1 || sampleRate <= 0) return null;
+    const totalDuration = Number(meta?.format?.duration) || 0;
+    return embedded.map((chapter, index) => {
+      const startTime = Math.max(0, Number(chapter.sampleOffset) / sampleRate);
+      const next = embedded[index + 1];
+      const endTime = next
+        ? Math.max(startTime, Number(next.sampleOffset) / sampleRate)
+        : Math.max(startTime, totalDuration);
+      return {
+        id: index,
+        filename: path.basename(filePath),
+        filepath: filePath,
+        title: String(chapter.title || existingChapters[index]?.title || `Chapter ${index + 1}`),
+        startTime,
+        endTime,
+        duration: Math.max(0, endTime - startTime),
+      };
+    });
+  } catch (error) {
+    console.warn('Embedded chapter parsing skipped:', error.message);
+    return null;
+  }
 }
 
 // ── EPUB helpers ─────────────────────────────────────────────────────────────
@@ -1777,16 +1845,17 @@ app.on('window-all-closed', () => {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 960,
-    minHeight: 640,
-    frame: false,
-    backgroundColor: '#0a0a0f',
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js'),
+      width: 1280,
+      height: 820,
+      minWidth: 960,
+      minHeight: 640,
+      frame: false,
+      backgroundColor: '#0a0a0f',
+      icon: path.join(__dirname, 'assets', 'grimoire-logo.png'),
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        preload: path.join(__dirname, 'preload.js'),
       webSecurity: false,
     },
   });
@@ -1844,13 +1913,18 @@ function registerIPC() {
     const existing = Object.values(db.books).find(b => b.folderPath === folderPath);
     const bookId = existing ? existing.id : crypto.randomUUID();
 
-    const chapters = files.map((filename, i) => ({
+    let chapters = files.map((filename, i) => ({
       id: i,
       filename,
       filepath: path.join(folderPath, filename),
       title: chapterTitle(filename),
       duration: existing?.chapters?.[i]?.duration || 0,
     }));
+
+    if (files.length === 1) {
+      const embeddedChapters = await buildEmbeddedChapters(path.join(folderPath, files[0]), existing?.chapters || []);
+      if (embeddedChapters?.length) chapters = embeddedChapters;
+    }
 
     // Try to extract cover art from ID3/MP4 tags if no cover is set yet
     let coverPath = existing?.coverPath || null;
@@ -1878,7 +1952,7 @@ function registerIPC() {
       id: bookId,
       title: bookTitle(folderPath),
       folderPath,
-      chapterCount: files.length,
+      chapterCount: chapters.length,
       addedAt: existing ? existing.addedAt : new Date().toISOString(),
       coverPath,
       chapters,
@@ -2064,6 +2138,11 @@ function registerIPC() {
 
   // Get playback state
   ipcMain.handle('playback:get', (_e, bookId) => db.playback[bookId] || null);
+  ipcMain.handle('playback:reset', (_e, bookId) => {
+    delete db.playback[bookId];
+    saveDb();
+    return true;
+  });
 
   // Bookmarks
   ipcMain.handle('bookmarks:add', (_e, { bookId, chapterIndex, position, name }) => {
@@ -2106,11 +2185,12 @@ function registerIPC() {
     }
     transcribeWindowReady = false;
     transcribeWindow = new BrowserWindow({
-      show: false,
-      webPreferences: {
-        nodeIntegration: true,
-        contextIsolation: false,
-        webSecurity: false,
+        show: false,
+        icon: path.join(__dirname, 'assets', 'grimoire-logo.png'),
+        webPreferences: {
+          nodeIntegration: true,
+          contextIsolation: false,
+          webSecurity: false,
         // .mjs preload: loaded by Node.js's ESM loader so bare npm specifiers
         // resolve correctly, while Worker runs in Chromium for blob: URL support.
         preload: path.join(__dirname, 'src', 'transcribe-preload.mjs'),
@@ -2942,6 +3022,7 @@ function registerIPC() {
         author: catBook.author || storedBook.author || '',
         series: catBook.series || storedBook.series || null,
         seriesOrder: catBook.series_order || storedBook.seriesOrder || null,
+        genres: Array.isArray(catBook.genres) ? catBook.genres : (storedBook.genres || []),
         folderPath: splitResult.outDir,
         chapterCount: splitResult.chapters.length,
         chapters: splitResult.chapters,
@@ -3152,6 +3233,15 @@ function registerIPC() {
     return true;
   });
 
+  ipcMain.handle('book:setFavorite', (_e, { bookId, favorite }) => {
+    if (db.books[bookId]) {
+      if (favorite) db.books[bookId].favorite = true;
+      else delete db.books[bookId].favorite;
+      saveDb();
+    }
+    return true;
+  });
+
   // Update chapter duration (for accurate progress)
   ipcMain.handle('chapters:updateDuration', (_e, { bookId, chapterId, duration }) => {
     const book = db.books[bookId];
@@ -3186,6 +3276,7 @@ function registerIPC() {
       currentUser = await hydrateAuthUser(data.user);
       saveSession(data.session);
       setAuthSkipped(false);
+      fetchAndCacheS3Config().catch(() => {});
       return { user: publicUser(currentUser) };
     } catch (e) { return { error: e.message }; }
   });
@@ -3212,6 +3303,7 @@ function registerIPC() {
         currentUser = await hydrateAuthUser(data.user, validated.value);
         saveSession(data.session);
         setAuthSkipped(false);
+        fetchAndCacheS3Config().catch(() => {});
         return { user: publicUser(currentUser) };
       }
       return { needsConfirmation: true };
@@ -3346,12 +3438,13 @@ function registerIPC() {
     return { region: cfg.region, bucket: cfg.bucket, accessKeyId: cfg.accessKeyId, hasSecret: !!cfg.secretAccessKey };
   });
 
-  ipcMain.handle('s3:saveConfig', (_e, cfg) => {
+  ipcMain.handle('s3:saveConfig', async (_e, cfg) => {
     // cfg may omit secretAccessKey if user didn't re-enter it
     const existing = loadS3Config();
     const merged = { ...existing, ...cfg };
     if (!cfg.secretAccessKey) merged.secretAccessKey = existing.secretAccessKey;
     saveS3Config(merged);
+    pushS3ConfigToSupabase(merged).catch(() => {});
     return true;
   });
 
@@ -3678,6 +3771,7 @@ function registerIPC() {
       author: catBook.author || existing?.author || '',
       series: catBook.series || existing?.series || null,
       seriesOrder: catBook.series_order || existing?.seriesOrder || null,
+      genres: Array.isArray(catBook.genres) ? catBook.genres : (existing?.genres || []),
       folderPath: targetDir,
       chapterCount: catBook.chapter_count || localChapters.length,
       addedAt: existing?.addedAt || new Date().toISOString(),
@@ -3806,6 +3900,7 @@ function registerIPC() {
           ...b,
           updated_at: b.updated_at || structure.updatedAt,
           structure_hash: b.structure_hash || structure.structureHash,
+          genres: Array.isArray(b.genres) ? b.genres : [],
           coverPath,
           coverUrl: null,
           downloadedLocally,
@@ -3866,6 +3961,7 @@ function registerIPC() {
           author:          cat.author || '',
           series:          cat.series || null,
           seriesOrder:     cat.series_order || null,
+          genres:          Array.isArray(cat.genres) ? cat.genres : [],
           s3Prefix:        cat.s3_prefix,
           chapters,
           chapterCount:    cat.chapter_count || chapters.length,
@@ -4162,7 +4258,7 @@ function registerIPC() {
     return { success: true, bookId, chapterCount: files.length };
   });
 
-  ipcMain.handle('catalog:editBook', async (_e, { bookId, title, author, series, seriesOrder }) => {
+  ipcMain.handle('catalog:editBook', async (_e, { bookId, title, author, series, seriesOrder, genres }) => {
     if (!supabase || !currentUser) return { error: 'Not authenticated' };
     try {
       await ensureCatalogOwnership(bookId);
@@ -4171,9 +4267,19 @@ function registerIPC() {
       if (author  !== undefined) updates.author       = String(author  || '').trim() || null;
       if (series  !== undefined) updates.series       = String(series  || '').trim() || null;
       if (seriesOrder !== undefined) updates.series_order = seriesOrder ? parseInt(String(seriesOrder), 10) : null;
+      if (genres !== undefined) {
+        updates.genres = Array.isArray(genres)
+          ? genres.map(g => String(g || '').trim()).filter(Boolean)
+          : [];
+      }
       if (!updates.title) return { error: 'Title is required' };
       const { error } = await supabase.from('catalog').update(updates).eq('id', bookId);
-      if (error) return { error: error.message };
+      if (error) {
+        if (isUnknownColumnError(error)) {
+          return { error: 'Catalog schema is missing the genres column. Add that column first, then try again.' };
+        }
+        return { error: error.message };
+      }
       return { success: true };
     } catch (e) {
       return { error: e.message };

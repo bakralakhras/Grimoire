@@ -1,0 +1,172 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Grimoire — mobile app</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #f0eee9; overflow: hidden; }
+  * { box-sizing: border-box; }
+  ::-webkit-scrollbar { display: none; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="system.jsx"></script>
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="home.jsx"></script>
+<script type="text/babel" src="player.jsx"></script>
+<script type="text/babel" src="reader.jsx"></script>
+<script type="text/babel" src="discover.jsx"></script>
+<script type="text/babel" src="detail.jsx"></script>
+<script type="text/babel">
+
+function Frame({ children }) {
+  return (
+    <IOSDevice dark={true} width={390} height={844}>
+      {children}
+    </IOSDevice>
+  );
+}
+
+function App() {
+  return (
+    <DesignCanvas>
+      {/* Title block */}
+      <div style={{ padding: '0 60px 40px', maxWidth: 1100 }}>
+        <div style={{
+          fontFamily: '"Cormorant Garamond", serif', fontSize: 56, fontWeight: 500,
+          color: '#1a1520', letterSpacing: -1, lineHeight: 1,
+        }}>Grimoire</div>
+        <div style={{
+          fontFamily: '"Cormorant Garamond", serif', fontStyle: 'italic', fontSize: 22,
+          color: 'rgba(60,50,40,0.7)', marginTop: 8, letterSpacing: 0.2,
+        }}>A modern reading companion — audiobook + epub, bound in obsidian.</div>
+        <div style={{
+          fontFamily: 'Inter, sans-serif', fontSize: 13, color: 'rgba(60,50,40,0.55)',
+          marginTop: 16, maxWidth: 720, lineHeight: 1.55,
+        }}>
+          Dark but not gothic. The aesthetic leans on deep obsidian surfaces, amethyst
+          interaction glow, and rare gold accents reserved for ratings, highlights, and
+          chapter marks. Serifs (Cormorant) carry the book soul; Inter handles the UI;
+          mono marks timestamps. Subtle sigils replace stock iconography where the name
+          earns it — never costume-y.
+        </div>
+      </div>
+
+      <DCSection
+        title="Five screens"
+        subtitle="Library · Audiobook player · EPUB reader · Discover · Book detail"
+      >
+        <DCArtboard label="01 · Library / Home" width={390} height={844}>
+          <Frame><HomeScreen/></Frame>
+        </DCArtboard>
+
+        <DCArtboard label="02 · Now Playing" width={390} height={844}>
+          <Frame><PlayerScreen/></Frame>
+        </DCArtboard>
+
+        <DCArtboard label="03 · EPUB Reader" width={390} height={844}>
+          <Frame><ReaderScreen/></Frame>
+        </DCArtboard>
+
+        <DCArtboard label="04 · Discover" width={390} height={844}>
+          <Frame><DiscoverScreen/></Frame>
+        </DCArtboard>
+
+        <DCArtboard label="05 · Book Detail" width={390} height={844}>
+          <Frame><DetailScreen/></Frame>
+        </DCArtboard>
+
+        <DCPostIt top={-10} left={420} rotate={-3} width={200}>
+          Hero card for "continue" — gold progress bar earns its rare accent here.
+        </DCPostIt>
+        <DCPostIt top={380} left={860} rotate={2} width={210}>
+          Waveform scrubber instead of a flat line — audiobooks are about voice, not a signal.
+        </DCPostIt>
+        <DCPostIt top={200} left={1740} rotate={-2} width={210}>
+          Drop cap + gold highlight: reader feels like a book, not a text field.
+        </DCPostIt>
+      </DCSection>
+
+      {/* Design system strip */}
+      <DCSection title="System" subtitle="Palette · Type · Motif">
+        <DCArtboard label="Palette" width={640} height={360} style={{ background: '#0D0B12' }}>
+          <div style={{ padding: 32, height: '100%', display: 'flex', flexDirection: 'column', gap: 14,
+            fontFamily: 'Inter, sans-serif', color: '#F4EFE6' }}>
+            <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 26, letterSpacing: -0.3 }}>Obsidian + Amethyst + Gold</div>
+            <div style={{ fontSize: 11, color: 'rgba(244,239,230,0.5)', letterSpacing: 1.5, textTransform: 'uppercase' }}>Surfaces cool, accents warm</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8, marginTop: 10 }}>
+              {[
+                ['#08070B', 'Ink'],
+                ['#0D0B12', 'Obsidian'],
+                ['#141119', 'Raven'],
+                ['#1C1825', 'Smoke'],
+                ['#26212F', 'Ash'],
+                ['#8B5CF6', 'Amethyst'],
+              ].map(([c, n]) => (
+                <div key={n}>
+                  <div style={{ aspectRatio: '1', background: c, borderRadius: 8, border: '0.5px solid rgba(255,255,255,0.08)' }}/>
+                  <div style={{ fontSize: 10, marginTop: 6, color: 'rgba(244,239,230,0.7)', fontFamily: 'JetBrains Mono, monospace' }}>{n}</div>
+                  <div style={{ fontSize: 9, color: 'rgba(244,239,230,0.4)', fontFamily: 'JetBrains Mono, monospace' }}>{c}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 6, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+              {[
+                ['#A78BFA', 'Violet'],
+                ['#C9A24A', 'Gold'],
+                ['#E8E1D1', 'Parchment'],
+              ].map(([c, n]) => (
+                <div key={n}>
+                  <div style={{ height: 36, background: c, borderRadius: 8 }}/>
+                  <div style={{ fontSize: 10, marginTop: 6, color: 'rgba(244,239,230,0.7)', fontFamily: 'JetBrains Mono, monospace' }}>{n} · {c}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </DCArtboard>
+
+        <DCArtboard label="Type" width={520} height={360} style={{ background: '#0D0B12' }}>
+          <div style={{ padding: 32, height: '100%', color: '#F4EFE6', display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 44, lineHeight: 1, letterSpacing: -0.5 }}>Cormorant Garamond</div>
+            <div style={{ fontFamily: '"Cormorant Garamond", serif', fontStyle: 'italic', fontSize: 18, color: 'rgba(244,239,230,0.7)' }}>Titles · synopsis · in-book prose</div>
+            <div style={{ height: 0.5, background: 'rgba(244,239,230,0.15)' }}/>
+            <div style={{ fontFamily: 'Inter, sans-serif', fontSize: 28, fontWeight: 600, letterSpacing: -0.3 }}>Inter</div>
+            <div style={{ fontFamily: 'Inter, sans-serif', fontSize: 13, color: 'rgba(244,239,230,0.7)' }}>UI labels, buttons, metadata — sans that gets out of the way</div>
+            <div style={{ height: 0.5, background: 'rgba(244,239,230,0.15)' }}/>
+            <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 16, letterSpacing: 0.5 }}>04:01:22 / 11:42:00</div>
+            <div style={{ fontFamily: 'Inter, sans-serif', fontSize: 11, color: 'rgba(244,239,230,0.5)', letterSpacing: 1.2 }}>JetBrains Mono — times, page numbers, percent</div>
+          </div>
+        </DCArtboard>
+
+        <DCArtboard label="Sigils" width={440} height={360} style={{ background: '#0D0B12' }}>
+          <div style={{ padding: 32, color: '#F4EFE6', height: '100%' }}>
+            <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 26, marginBottom: 6 }}>Sigils, not emoji</div>
+            <div style={{ fontSize: 11, color: 'rgba(244,239,230,0.5)', letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 20 }}>Sparingly, in gold</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20, justifyItems: 'center' }}>
+              {['moon', 'eye', 'star', 'sun', 'tri', 'circle', 'rune'].map(k => (
+                <div key={k} style={{ textAlign: 'center' }}>
+                  <Sigil kind={k} size={36} color="#C9A24A" stroke={1.3}/>
+                  <div style={{ fontSize: 10, color: 'rgba(244,239,230,0.5)', marginTop: 8, fontFamily: 'JetBrains Mono, monospace', letterSpacing: 0.5 }}>{k}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

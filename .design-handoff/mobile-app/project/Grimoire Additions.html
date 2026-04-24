@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Grimoire — Additions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #f0eee9; overflow: hidden; }
+  * { box-sizing: border-box; }
+  ::-webkit-scrollbar { display: none; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="system.jsx"></script>
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="player.jsx"></script>
+<script type="text/babel" src="additions.jsx"></script>
+<script type="text/babel">
+function Frame({ children }) { return <IOSDevice dark={true} width={390} height={844}>{children}</IOSDevice>; }
+
+function App() {
+  return (
+    <DesignCanvas>
+      <div style={{ padding: '0 60px 40px', maxWidth: 1100 }}>
+        <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 56, fontWeight: 500, color: '#1a1520', letterSpacing: -1, lineHeight: 1 }}>Grimoire — Additions</div>
+        <div style={{ fontFamily: '"Cormorant Garamond", serif', fontStyle: 'italic', fontSize: 22, color: 'rgba(60,50,40,0.7)', marginTop: 8 }}>
+          Five features that earn the name: whispersync follow-along, an onboarding sigil, a constellation of finished tomes, a poetic sleep timer, and a marginalia drawer.
+        </div>
+      </div>
+
+      <DCSection title="Signature features" subtitle="Follow-Along · Onboarding · Constellation · Sleep Timer · Marginalia">
+        <DCArtboard label="01 · Follow Along (whispersync)" width={390} height={844}>
+          <Frame><FollowAlongScreen/></Frame>
+        </DCArtboard>
+        <DCArtboard label="02 · Onboarding — pick a sigil" width={390} height={844}>
+          <Frame><OnboardingScreen/></Frame>
+        </DCArtboard>
+        <DCArtboard label="03 · Constellation (year in review)" width={390} height={844}>
+          <Frame><ConstellationScreen/></Frame>
+        </DCArtboard>
+        <DCArtboard label="04 · Sleep timer" width={390} height={844}>
+          <Frame><SleepTimerScreen/></Frame>
+        </DCArtboard>
+        <DCArtboard label="05 · Marginalia (highlights)" width={390} height={844}>
+          <Frame><HighlightsScreen/></Frame>
+        </DCArtboard>
+
+        <DCPostIt top={-10} left={420} rotate={-3} width={210}>
+          Amethyst sweeps the sentence being narrated; word-level waveform in the player bar.
+        </DCPostIt>
+        <DCPostIt top={400} left={870} rotate={2} width={210}>
+          Sigil-as-mark: personal identity carried across the app.
+        </DCPostIt>
+        <DCPostIt top={100} left={1730} rotate={-2} width={210}>
+          Finished tomes become stars — genres form houses. No streak guilt.
+        </DCPostIt>
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

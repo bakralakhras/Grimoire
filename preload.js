@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('api', {
   // Playback
   savePlayback: (data)   => ipcRenderer.invoke('playback:save', data),
   getPlayback:  (bookId) => ipcRenderer.invoke('playback:get', bookId),
+  resetPlayback: (bookId) => ipcRenderer.invoke('playback:reset', bookId),
 
   // Bookmarks
   addBookmark:    (data) => ipcRenderer.invoke('bookmarks:add', data),
@@ -41,6 +42,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // Rating
   setRating: (data) => ipcRenderer.invoke('book:setRating', data),
+  setFavorite: (data) => ipcRenderer.invoke('book:setFavorite', data),
 
   // Chapters
   updateChapterDuration: (data) => ipcRenderer.invoke('chapters:updateDuration', data),
